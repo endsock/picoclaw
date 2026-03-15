@@ -1,3 +1,8 @@
+# 编译
+编译步骤总结：
+1. 首先运行 go generate ./... 生成嵌入的 workspace 文件
+2. 使用 go build -v -tags stdjson -o build/picoclaw.exe ./cmd/picoclaw 编译项目
+
 # Debugging PicoClaw
 
 PicoClaw performs multiple complex interactions under the hood for every single request it receives—from routing messages and evaluating complexity, to executing tools and adapting to model failures. Being able to see exactly what is happening is crucial, not just for troubleshooting potential issues, but also for truly understanding how the agent operates.

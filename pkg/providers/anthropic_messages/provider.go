@@ -221,11 +221,20 @@ func buildRequestBody(
 
 			// Add tool_use blocks
 			for _, tc := range msg.ToolCalls {
+				// tc.Arguments may be nil when restored from session
+				// (its json tag is "-"), so recover from Function.Arguments.
+				args := tc.Arguments
+				if args == nil && tc.Function != nil && tc.Function.Arguments != "" {
+					var parsed map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &parsed); err == nil {
+						args = parsed
+					}
+				}
 				toolUse := map[string]any{
 					"type":  "tool_use",
 					"id":    tc.ID,
 					"name":  tc.Name,
-					"input": tc.Arguments,
+					"input": args,
 				}
 				content = append(content, toolUse)
 			}

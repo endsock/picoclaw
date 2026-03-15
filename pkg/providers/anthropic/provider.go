@@ -94,17 +94,8 @@ func (p *Provider) Chat(
 		return nil, err
 	}
 
-	// OAuth/setup-tokens require streaming; API keys use non-streaming.
-	if p.tokenSource != nil {
-		return p.chatStreaming(ctx, params, opts)
-	}
-
-	resp, err := p.client.Messages.New(ctx, params, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("claude API call: %w", err)
-	}
-
-	return parseResponse(resp), nil
+	// Always use streaming to avoid Anthropic's 10-minute non-streaming timeout.
+	return p.chatStreaming(ctx, params, opts)
 }
 
 func (p *Provider) chatStreaming(

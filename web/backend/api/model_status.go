@@ -55,23 +55,22 @@ func isModelConfigured(m config.ModelConfig) bool {
 }
 
 func requiresRuntimeProbe(m config.ModelConfig) bool {
-	authMethod := strings.ToLower(strings.TrimSpace(m.AuthMethod))
-	if authMethod == "local" {
-		return true
-	}
-
-	switch modelProtocol(m.Model) {
-	case "claude-cli", "claudecli", "codex-cli", "codexcli", "github-copilot", "copilot":
-		return true
-	case "ollama", "vllm":
-		apiBase := strings.TrimSpace(m.APIBase)
-		return apiBase == "" || hasLocalAPIBase(apiBase)
-	}
-
-	if hasLocalAPIBase(m.APIBase) {
-		return true
-	}
-
+	//authMethod := strings.ToLower(strings.TrimSpace(m.AuthMethod))
+	//if authMethod == "local" {
+	//	return true
+	//}
+	//
+	//switch modelProtocol(m.Model) {
+	//case "claude-cli", "claudecli", "codex-cli", "codexcli", "github-copilot", "copilot":
+	//	return true
+	//case "ollama", "vllm":
+	//	apiBase := strings.TrimSpace(m.APIBase)
+	//	return apiBase == "" || hasLocalAPIBase(apiBase)
+	//}
+	//
+	//if hasLocalAPIBase(m.APIBase) {
+	//	return true
+	//}
 	return false
 }
 
@@ -235,12 +234,9 @@ func probeOpenAICompatibleModel(apiBase, modelID string) bool {
 		return false
 	}
 
-	for _, model := range resp.Data {
-		if strings.EqualFold(strings.TrimSpace(model.ID), modelID) {
-			return true
-		}
-	}
-	return false
+	// If the endpoint responded successfully, treat it as available
+	// regardless of whether the specific model ID appears in the list.
+	return true
 }
 
 func getJSON(rawURL string, out any) error {

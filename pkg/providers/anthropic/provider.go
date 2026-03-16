@@ -171,16 +171,24 @@ func buildParams(
 					blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
 				}
 				for _, tc := range msg.ToolCalls {
+					// tc.Name and tc.Arguments may be empty/nil when restored from session
+					// (their json tags are "-"), so recover from Function fields.
+					name := tc.Name
 					args := tc.Arguments
-					if args == nil && tc.Function != nil && tc.Function.Arguments != "" {
-						if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-							args = map[string]any{}
+					if tc.Function != nil {
+						if name == "" {
+							name = tc.Function.Name
+						}
+						if args == nil && tc.Function.Arguments != "" {
+							if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+								args = map[string]any{}
+							}
 						}
 					}
 					if args == nil {
 						args = map[string]any{}
 					}
-					blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, args, tc.Name))
+					blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, args, name))
 				}
 				anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(blocks...))
 			} else {
@@ -342,10 +350,15 @@ func parseResponse(resp *anthropic.Message) *LLMResponse {
 				log.Printf("anthropic: failed to decode tool call input for %q: %v", tu.Name, err)
 				args = map[string]any{"raw": string(tu.Input)}
 			}
+			argsJSON, _ := json.Marshal(args)
 			toolCalls = append(toolCalls, ToolCall{
 				ID:        tu.ID,
 				Name:      tu.Name,
 				Arguments: args,
+				Function: &FunctionCall{
+					Name:      tu.Name,
+					Arguments: string(argsJSON),
+				},
 			})
 		}
 	}

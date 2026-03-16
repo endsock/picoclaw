@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,6 +165,11 @@ func (sm *SubagentManager) resolveConfig(agentID, modelName string) *subagentCon
 	// 如果指定了 agent_id，通过 AgentLookup 接口获取目标 agent 配置
 	if agentID != "" && sm.agentLookup != nil {
 		if ac, ok := sm.agentLookup.LookupAgent(agentID); ok {
+			logger.InfoCF("subagent", "Resolved agent config",
+				map[string]any{
+					"agent_id":  agentID,
+					"workspace": ac.Workspace,
+				})
 			cfg.workspace = ac.Workspace
 			cfg.maxTokens = ac.MaxTokens
 			cfg.temperature = ac.Temperature
@@ -178,10 +184,13 @@ func (sm *SubagentManager) resolveConfig(agentID, modelName string) *subagentCon
 func (sm *SubagentManager) buildSubagentSystemPrompt(workspace string) string {
 	var sb strings.Builder
 
-	// 1. 基础身份
+	// 1. 基础身份和工作目录
 	sb.WriteString("# Subagent\n\n")
 	sb.WriteString("You are a subagent executing a delegated task. ")
 	sb.WriteString("Complete the task independently and report the result.\n\n")
+
+	// 明确告知工作目录
+	sb.WriteString(fmt.Sprintf("## Workspace\n\nYour workspace is at: %s\n\n", workspace))
 
 	// 2. 从 workspace 加载上下文文件
 	bootstrapFiles := []string{

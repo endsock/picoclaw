@@ -225,19 +225,45 @@ func registerSharedTools(
 		// Spawn tool with allowlist checker
 		if cfg.Tools.IsToolEnabled("spawn") {
 			if cfg.Tools.IsToolEnabled("subagent") {
-				subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace)
+				subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace, agent.Tools)
 				subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
+
+				// 注入 AgentLookup 接口，使 subagent 可以查询目标 agent 的配置
+				subagentManager.SetAgentLookup(&agentLookupAdapter{registry: registry})
+
 				spawnTool := tools.NewSpawnTool(subagentManager)
 				currentAgentID := agentID
 				spawnTool.SetAllowlistChecker(func(targetAgentID string) bool {
 					return registry.CanSpawnSubagent(currentAgentID, targetAgentID)
 				})
 				agent.Tools.Register(spawnTool)
+
+				// Also register SubagentTool for synchronous execution
+				subagentTool := tools.NewSubagentTool(subagentManager)
+				agent.Tools.Register(subagentTool)
 			} else {
 				logger.WarnCF("agent", "spawn tool requires subagent to be enabled", nil)
 			}
 		}
 	}
+}
+
+// agentLookupAdapter 将 AgentRegistry 适配为 tools.AgentLookup 接口
+type agentLookupAdapter struct {
+	registry *AgentRegistry
+}
+
+func (a *agentLookupAdapter) LookupAgent(agentID string) (tools.AgentConfig, bool) {
+	agent, ok := a.registry.GetAgent(agentID)
+	if !ok {
+		return tools.AgentConfig{}, false
+	}
+	return tools.AgentConfig{
+		Workspace:   agent.Workspace,
+		MaxTokens:   agent.MaxTokens,
+		Temperature: agent.Temperature,
+		Tools:       agent.Tools,
+	}, true
 }
 
 func (al *AgentLoop) Run(ctx context.Context) error {

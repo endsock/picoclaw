@@ -3,17 +3,45 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/skills"
 )
+
+// AgentLookup 提供通过 agent_id 查询 agent 配置的能力
+// 定义在 pkg/tools/subagent.go 中，由 pkg/agent 实现
+type AgentLookup interface {
+	LookupAgent(agentID string) (AgentConfig, bool)
+}
+
+// AgentConfig 包含 subagent 运行时需要的配置信息
+type AgentConfig struct {
+	Workspace   string
+	MaxTokens   int
+	Temperature float64
+	Tools       *ToolRegistry
+}
+
+// subagentConfig 包含 subagent 运行时需要的所有配置
+type subagentConfig struct {
+	model       string
+	workspace   string
+	maxTokens   int
+	temperature float64
+	tools       *ToolRegistry
+}
 
 type SubagentTask struct {
 	ID            string
 	Task          string
 	Label         string
 	AgentID       string
+	ModelName     string // 新增：指定的模型名称（必传）
 	OriginChannel string
 	OriginChatID  string
 	Status        string
@@ -27,25 +55,32 @@ type SubagentManager struct {
 	provider       providers.LLMProvider
 	defaultModel   string
 	workspace      string
-	tools          *ToolRegistry
+	tools          *ToolRegistry // 父 agent 的工具注册表（用于未指定 agent_id 时）
 	maxIterations  int
 	maxTokens      int
 	temperature    float64
 	hasMaxTokens   bool
 	hasTemperature bool
 	nextID         int
+
+	// 新增字段
+	agentLookup AgentLookup // 用于通过 agent_id 查询 agent 配置
 }
 
 func NewSubagentManager(
 	provider providers.LLMProvider,
 	defaultModel, workspace string,
+	parentTools *ToolRegistry,
 ) *SubagentManager {
+	if parentTools == nil {
+		parentTools = NewToolRegistry()
+	}
 	return &SubagentManager{
 		tasks:         make(map[string]*SubagentTask),
 		provider:      provider,
 		defaultModel:  defaultModel,
 		workspace:     workspace,
-		tools:         NewToolRegistry(),
+		tools:         parentTools,
 		maxIterations: 10,
 		nextID:        1,
 	}
@@ -69,6 +104,13 @@ func (sm *SubagentManager) SetTools(tools *ToolRegistry) {
 	sm.tools = tools
 }
 
+// SetAgentLookup 设置 agent 查询接口（可选）
+func (sm *SubagentManager) SetAgentLookup(lookup AgentLookup) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.agentLookup = lookup
+}
+
 // RegisterTool registers a tool for subagent execution.
 func (sm *SubagentManager) RegisterTool(tool Tool) {
 	sm.mu.Lock()
@@ -78,7 +120,7 @@ func (sm *SubagentManager) RegisterTool(tool Tool) {
 
 func (sm *SubagentManager) Spawn(
 	ctx context.Context,
-	task, label, agentID, originChannel, originChatID string,
+	task, label, agentID, modelName, originChannel, originChatID string,
 	callback AsyncCallback,
 ) (string, error) {
 	sm.mu.Lock()
@@ -92,6 +134,7 @@ func (sm *SubagentManager) Spawn(
 		Task:          task,
 		Label:         label,
 		AgentID:       agentID,
+		ModelName:     modelName,
 		OriginChannel: originChannel,
 		OriginChatID:  originChatID,
 		Status:        "running",
@@ -108,14 +151,119 @@ func (sm *SubagentManager) Spawn(
 	return fmt.Sprintf("Spawned subagent for task: %s", task), nil
 }
 
+// resolveConfig 解析 subagent 的运行时配置
+func (sm *SubagentManager) resolveConfig(agentID, modelName string) *subagentConfig {
+	cfg := &subagentConfig{
+		model:       modelName, // 直接使用传入的 model（必传参数）
+		workspace:   sm.workspace,
+		maxTokens:   sm.maxTokens,
+		temperature: sm.temperature,
+		tools:       sm.tools, // 默认使用父 agent 的工具
+	}
+
+	// 如果指定了 agent_id，通过 AgentLookup 接口获取目标 agent 配置
+	if agentID != "" && sm.agentLookup != nil {
+		if ac, ok := sm.agentLookup.LookupAgent(agentID); ok {
+			cfg.workspace = ac.Workspace
+			cfg.maxTokens = ac.MaxTokens
+			cfg.temperature = ac.Temperature
+			cfg.tools = ac.Tools // 使用目标 agent 的工具
+		}
+	}
+
+	return cfg
+}
+
+// buildSubagentSystemPrompt 从 workspace 加载上下文文件构建 system prompt
+func (sm *SubagentManager) buildSubagentSystemPrompt(workspace string) string {
+	var sb strings.Builder
+
+	// 1. 基础身份
+	sb.WriteString("# Subagent\n\n")
+	sb.WriteString("You are a subagent executing a delegated task. ")
+	sb.WriteString("Complete the task independently and report the result.\n\n")
+
+	// 2. 从 workspace 加载上下文文件
+	bootstrapFiles := []string{
+		"AGENTS.md",
+		"SOUL.md",
+		"USER.md",
+	}
+
+	for _, filename := range bootstrapFiles {
+		path := filepath.Join(workspace, filename)
+		if content, err := os.ReadFile(path); err == nil && len(content) > 0 {
+			sb.WriteString(fmt.Sprintf("## %s\n\n", filename))
+			sb.WriteString(string(content))
+			sb.WriteString("\n\n")
+		}
+	}
+
+	// 3. 加载 memory/MEMORY.md
+	memoryPath := filepath.Join(workspace, "memory", "MEMORY.md")
+	if content, err := os.ReadFile(memoryPath); err == nil && len(content) > 0 {
+		sb.WriteString("## Memory\n\n")
+		sb.WriteString(string(content))
+		sb.WriteString("\n\n")
+	}
+
+	// 4. 工具使用提示
+	sb.WriteString("## Instructions\n\n")
+	sb.WriteString("You have access to tools - use them as needed to complete your task. ")
+	sb.WriteString("After completing the task, provide a clear summary of what was done.\n")
+
+	return sb.String()
+}
+
+// buildSubagentSkillsSummary 加载指定 agent 的 skills 摘要
+func (sm *SubagentManager) buildSubagentSkillsSummary(workspace string) string {
+	// 复用 skills.SkillsLoader 的逻辑
+	skillsLoader := skills.NewSkillsLoader(workspace,
+		filepath.Join(getGlobalConfigDir(), "skills"),
+		getBuiltinSkillsDir())
+
+	return skillsLoader.BuildSkillsSummary()
+}
+
+// getGlobalConfigDir 获取全局配置目录
+func getGlobalConfigDir() string {
+	if home := os.Getenv("PICOCLAW_HOME"); home != "" {
+		return home
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".picoclaw")
+}
+
+// getBuiltinSkillsDir 获取内置 skills 目录
+func getBuiltinSkillsDir() string {
+	if dir := os.Getenv("PICOCLAW_BUILTIN_SKILLS"); dir != "" {
+		return dir
+	}
+	wd, _ := os.Getwd()
+	return filepath.Join(wd, "skills")
+}
+
 func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, callback AsyncCallback) {
 	task.Status = "running"
 	task.Created = time.Now().UnixMilli()
 
-	// Build system prompt for subagent
-	systemPrompt := `You are a subagent. Complete the given task independently and report the result.
-You have access to tools - use them as needed to complete your task.
-After completing the task, provide a clear summary of what was done.`
+	// 解析配置
+	sm.mu.RLock()
+	cfg := sm.resolveConfig(task.AgentID, task.ModelName)
+	maxIter := sm.maxIterations
+	sm.mu.RUnlock()
+
+	// 构建 system prompt（从 workspace 加载）
+	systemPrompt := sm.buildSubagentSystemPrompt(cfg.workspace)
+
+	// 构建 skills 摘要
+	skillsSummary := sm.buildSubagentSkillsSummary(cfg.workspace)
+	if skillsSummary != "" {
+		systemPrompt += "\n\n" + skillsSummary
+	}
 
 	messages := []providers.Message{
 		{
@@ -139,31 +287,23 @@ After completing the task, provide a clear summary of what was done.`
 	default:
 	}
 
-	// Run tool loop with access to tools
-	sm.mu.RLock()
-	tools := sm.tools
-	maxIter := sm.maxIterations
-	maxTokens := sm.maxTokens
-	temperature := sm.temperature
-	hasMaxTokens := sm.hasMaxTokens
-	hasTemperature := sm.hasTemperature
-	sm.mu.RUnlock()
-
+	// 构建 LLM 选项
 	var llmOptions map[string]any
-	if hasMaxTokens || hasTemperature {
+	if cfg.maxTokens > 0 || cfg.temperature > 0 {
 		llmOptions = map[string]any{}
-		if hasMaxTokens {
-			llmOptions["max_tokens"] = maxTokens
+		if cfg.maxTokens > 0 {
+			llmOptions["max_tokens"] = cfg.maxTokens
 		}
-		if hasTemperature {
-			llmOptions["temperature"] = temperature
+		if cfg.temperature > 0 {
+			llmOptions["temperature"] = cfg.temperature
 		}
 	}
 
+	// 运行工具循环，使用解析后的模型和配置
 	loopResult, err := RunToolLoop(ctx, ToolLoopConfig{
 		Provider:      sm.provider,
-		Model:         sm.defaultModel,
-		Tools:         tools,
+		Model:         cfg.model,
+		Tools:         cfg.tools,
 		MaxIterations: maxIter,
 		LLMOptions:    llmOptions,
 	}, messages, task.OriginChannel, task.OriginChatID)
@@ -263,8 +403,16 @@ func (t *SubagentTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Optional short label for the task (for display)",
 			},
+			"agent_id": map[string]any{
+				"type":        "string",
+				"description": "Optional target agent ID to delegate the task to",
+			},
+			"model_name": map[string]any{
+				"type":        "string",
+				"description": "Required model name to use (e.g., claude-sonnet-4-6)",
+			},
 		},
-		"required": []string{"task"},
+		"required": []string{"task", "model_name"},
 	}
 }
 
@@ -274,17 +422,36 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		return ErrorResult("task is required").WithError(fmt.Errorf("task parameter is required"))
 	}
 
+	modelName, ok := args["model_name"].(string)
+	if !ok || strings.TrimSpace(modelName) == "" {
+		return ErrorResult("model_name is required").WithError(fmt.Errorf("model_name parameter is required"))
+	}
+
 	label, _ := args["label"].(string)
+	agentID, _ := args["agent_id"].(string)
 
 	if t.manager == nil {
 		return ErrorResult("Subagent manager not configured").WithError(fmt.Errorf("manager is nil"))
 	}
 
-	// Build messages for subagent
+	// 解析配置（通过 AgentLookup 接口查询 agent 配置）
+	sm := t.manager
+	sm.mu.RLock()
+	cfg := sm.resolveConfig(agentID, modelName)
+	maxIter := sm.maxIterations
+	sm.mu.RUnlock()
+
+	// 构建带上下文的 system prompt
+	systemPrompt := sm.buildSubagentSystemPrompt(cfg.workspace)
+	skillsSummary := sm.buildSubagentSkillsSummary(cfg.workspace)
+	if skillsSummary != "" {
+		systemPrompt += "\n\n" + skillsSummary
+	}
+
 	messages := []providers.Message{
 		{
 			Role:    "system",
-			Content: "You are a subagent. Complete the given task independently and provide a clear, concise result.",
+			Content: systemPrompt,
 		},
 		{
 			Role:    "user",
@@ -292,30 +459,19 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		},
 	}
 
-	// Use RunToolLoop to execute with tools (same as async SpawnTool)
-	sm := t.manager
-	sm.mu.RLock()
-	tools := sm.tools
-	maxIter := sm.maxIterations
-	maxTokens := sm.maxTokens
-	temperature := sm.temperature
-	hasMaxTokens := sm.hasMaxTokens
-	hasTemperature := sm.hasTemperature
-	sm.mu.RUnlock()
-
+	// 构建 LLM 选项
 	var llmOptions map[string]any
-	if hasMaxTokens || hasTemperature {
+	if cfg.maxTokens > 0 || cfg.temperature > 0 {
 		llmOptions = map[string]any{}
-		if hasMaxTokens {
-			llmOptions["max_tokens"] = maxTokens
+		if cfg.maxTokens > 0 {
+			llmOptions["max_tokens"] = cfg.maxTokens
 		}
-		if hasTemperature {
-			llmOptions["temperature"] = temperature
+		if cfg.temperature > 0 {
+			llmOptions["temperature"] = cfg.temperature
 		}
 	}
 
-	// Fall back to "cli"/"direct" for non-conversation callers (e.g., CLI, tests)
-	// to preserve the same defaults as the original NewSubagentTool constructor.
+	// Fall back to "cli"/"direct" for non-conversation callers
 	channel := ToolChannel(ctx)
 	if channel == "" {
 		channel = "cli"
@@ -327,8 +483,8 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 
 	loopResult, err := RunToolLoop(ctx, ToolLoopConfig{
 		Provider:      sm.provider,
-		Model:         sm.defaultModel,
-		Tools:         tools,
+		Model:         cfg.model,
+		Tools:         cfg.tools,
 		MaxIterations: maxIter,
 		LLMOptions:    llmOptions,
 	}, messages, channel, chatID)

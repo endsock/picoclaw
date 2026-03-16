@@ -44,8 +44,12 @@ func (t *SpawnTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Optional target agent ID to delegate the task to",
 			},
+			"model_name": map[string]any{
+				"type":        "string",
+				"description": "Required model name to use (e.g., claude-sonnet-4-6)",
+			},
 		},
-		"required": []string{"task"},
+		"required": []string{"task", "model_name"},
 	}
 }
 
@@ -67,6 +71,11 @@ func (t *SpawnTool) execute(ctx context.Context, args map[string]any, cb AsyncCa
 	task, ok := args["task"].(string)
 	if !ok || strings.TrimSpace(task) == "" {
 		return ErrorResult("task is required and must be a non-empty string")
+	}
+
+	modelName, ok := args["model_name"].(string)
+	if !ok || strings.TrimSpace(modelName) == "" {
+		return ErrorResult("model_name is required and must be a non-empty string")
 	}
 
 	label, _ := args["label"].(string)
@@ -96,7 +105,7 @@ func (t *SpawnTool) execute(ctx context.Context, args map[string]any, cb AsyncCa
 	}
 
 	// Pass callback to manager for async completion notification
-	result, err := t.manager.Spawn(ctx, task, label, agentID, channel, chatID, cb)
+	result, err := t.manager.Spawn(ctx, task, label, agentID, modelName, channel, chatID, cb)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("failed to spawn subagent: %v", err))
 	}

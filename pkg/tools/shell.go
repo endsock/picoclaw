@@ -45,7 +45,7 @@ var (
 		regexp.MustCompile(`:\(\)\s*\{.*\};\s*:`),
 		regexp.MustCompile(`\$\([^)]+\)`),
 		regexp.MustCompile(`\$\{[^}]+\}`),
-		regexp.MustCompile("`[^`]+`"),
+		regexp.MustCompile("`[^`]*\\s[^`]*`"),
 		regexp.MustCompile(`\|\s*sh\b`),
 		regexp.MustCompile(`\|\s*bash\b`),
 		regexp.MustCompile(`;\s*rm\s+-[rf]`),

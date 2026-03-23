@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1317,4 +1318,312 @@ func TestResolveMediaRefs_MixedImageAndFile(t *testing.T) {
 	if result[0].Content != expectedContent {
 		t.Fatalf("expected content %q, got %q", expectedContent, result[0].Content)
 	}
+}
+
+func mustJSON[T any](t *testing.T, value T) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	return string(data)
+}
+
+func readOutboundMessage(t *testing.T, msgBus *bus.MessageBus) bus.OutboundMessage {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	msg, ok := msgBus.SubscribeOutbound(ctx)
+	if !ok {
+		t.Fatal("expected outbound message")
+	}
+	return msg
+}
+
+func assertNoOutboundMessage(t *testing.T, msgBus *bus.MessageBus) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if msg, ok := msgBus.SubscribeOutbound(ctx); ok {
+		t.Fatalf("expected no outbound message, got %+v", msg)
+	}
+}
+
+func TestParseAsyncToolCallbackPayload(t *testing.T) {
+	validPayload := asyncToolCallbackPayload{
+		Version:          1,
+		ToolName:         "spawn",
+		ParentAgentID:    "parent",
+		ParentSessionKey: "agent:parent:session-1",
+		OriginChannel:    "telegram",
+		OriginChatID:     "chat-1",
+		Content:          "done",
+	}
+
+	tests := []struct {
+		name    string
+		msg     bus.InboundMessage
+		wantErr string
+	}{
+		{
+			name: "rejects legacy sender",
+			msg: bus.InboundMessage{
+				Channel:  "system",
+				SenderID: "async:spawn",
+				ChatID:   "chat-1",
+				Content:  mustJSON(t, validPayload),
+			},
+			wantErr: "unsupported system sender",
+		},
+		{
+			name: "rejects invalid json",
+			msg: bus.InboundMessage{
+				Channel:  "system",
+				SenderID: "async_callback",
+				ChatID:   "chat-1",
+				Content:  "{invalid",
+			},
+			wantErr: "invalid async callback payload json",
+		},
+		{
+			name: "rejects unsupported version",
+			msg: bus.InboundMessage{
+				Channel:  "system",
+				SenderID: "async_callback",
+				ChatID:   "chat-1",
+				Content: mustJSON(t, asyncToolCallbackPayload{
+					Version:          2,
+					ToolName:         "spawn",
+					ParentAgentID:    "parent",
+					ParentSessionKey: "agent:parent:session-1",
+					OriginChannel:    "telegram",
+					OriginChatID:     "chat-1",
+					Content:          "done",
+				}),
+			},
+			wantErr: "unsupported async callback payload version",
+		},
+		{
+			name: "rejects missing field",
+			msg: bus.InboundMessage{
+				Channel:  "system",
+				SenderID: "async_callback",
+				ChatID:   "chat-1",
+				Content: mustJSON(t, map[string]any{
+					"version":            1,
+					"tool_name":          "spawn",
+					"parent_agent_id":    "parent",
+					"parent_session_key": "agent:parent:session-1",
+					"origin_channel":     "telegram",
+					"content":            "done",
+				}),
+			},
+			wantErr: "missing origin_chat_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := parseAsyncToolCallbackPayload(tt.msg)
+			if err == nil {
+				t.Fatalf("expected error, got payload %+v", payload)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+
+	t.Run("accepts valid payload", func(t *testing.T) {
+		payload, err := parseAsyncToolCallbackPayload(bus.InboundMessage{
+			Channel:  "system",
+			SenderID: "async_callback",
+			ChatID:   "chat-1",
+			Content:  mustJSON(t, validPayload),
+		})
+		if err != nil {
+			t.Fatalf("parseAsyncToolCallbackPayload failed: %v", err)
+		}
+		if *payload != validPayload {
+			t.Fatalf("unexpected payload: got %+v want %+v", *payload, validPayload)
+		}
+	})
+}
+
+func TestProcessSystemMessage_UsesParentAgentAndSession(t *testing.T) {
+	al, cfg, msgBus, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+
+	cfg.Agents.List = []config.AgentConfig{
+		{ID: "main", Default: true},
+		{ID: "parent"},
+	}
+	al.registry = NewAgentRegistry(cfg, &simpleMockProvider{response: "parent reply"})
+
+	parentAgent, ok := al.registry.GetAgent("parent")
+	if !ok {
+		t.Fatal("expected parent agent")
+	}
+	defaultAgent := al.registry.GetDefaultAgent()
+	parentSessionKey := "agent:parent:custom-session"
+	defaultSessionKey := "agent:main:custom-session"
+
+	response, err := al.processSystemMessage(context.Background(), bus.InboundMessage{
+		Channel:  "system",
+		SenderID: "async_callback",
+		ChatID:   "origin-chat",
+		Content: mustJSON(t, asyncToolCallbackPayload{
+			Version:          1,
+			ToolName:         "spawn",
+			ParentAgentID:    "parent",
+			ParentSessionKey: parentSessionKey,
+			OriginChannel:    "telegram",
+			OriginChatID:     "origin-chat",
+			Content:          "subagent done",
+		}),
+	})
+	if err != nil {
+		t.Fatalf("processSystemMessage failed: %v", err)
+	}
+	if response != "" {
+		t.Fatalf("expected empty response, got %q", response)
+	}
+
+	parentHistory := parentAgent.Sessions.GetHistory(parentSessionKey)
+	if len(parentHistory) < 2 {
+		t.Fatalf("expected parent session history len>=2, got %d", len(parentHistory))
+	}
+	lastUser := parentHistory[len(parentHistory)-2]
+	lastAssistant := parentHistory[len(parentHistory)-1]
+	if lastUser.Role != "user" || lastUser.Content != "[System: async:spawn] subagent done" {
+		t.Fatalf("unexpected parent user message: %+v", lastUser)
+	}
+	if lastAssistant.Role != "assistant" || lastAssistant.Content != "parent reply" {
+		t.Fatalf("unexpected parent assistant message: %+v", lastAssistant)
+	}
+	if got := defaultAgent.Sessions.GetHistory(defaultSessionKey); len(got) != 0 {
+		t.Fatalf("expected default agent session to remain empty, got %+v", got)
+	}
+
+	outbound := readOutboundMessage(t, msgBus)
+	if outbound.Channel != "telegram" || outbound.ChatID != "origin-chat" || outbound.Content != "parent reply" {
+		t.Fatalf("unexpected outbound message: %+v", outbound)
+	}
+}
+
+func TestProcessSystemMessage_ParentAgentMissingReturnsError(t *testing.T) {
+	al, _, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+
+	_, err := al.processSystemMessage(context.Background(), bus.InboundMessage{
+		Channel:  "system",
+		SenderID: "async_callback",
+		ChatID:   "origin-chat",
+		Content: mustJSON(t, asyncToolCallbackPayload{
+			Version:          1,
+			ToolName:         "spawn",
+			ParentAgentID:    "missing-agent",
+			ParentSessionKey: "agent:missing-agent:session-1",
+			OriginChannel:    "telegram",
+			OriginChatID:     "origin-chat",
+			Content:          "subagent done",
+		}),
+	})
+	if err == nil {
+		t.Fatal("expected error for missing parent agent")
+	}
+	if !strings.Contains(err.Error(), "parent agent not found for async callback") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestProcessSystemMessage_RejectsLegacySenderID(t *testing.T) {
+	al, _, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+
+	_, err := al.processSystemMessage(context.Background(), bus.InboundMessage{
+		Channel:  "system",
+		SenderID: "async:spawn",
+		ChatID:   "telegram:chat-1",
+		Content:  "Task completed",
+	})
+	if err == nil {
+		t.Fatal("expected error for legacy sender")
+	}
+	if !strings.Contains(err.Error(), "unsupported system sender") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestProcessSystemMessage_SkipsInternalOriginChannel(t *testing.T) {
+	al, cfg, msgBus, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}, {ID: "parent"}}
+	al.registry = NewAgentRegistry(cfg, &simpleMockProvider{response: "should not send"})
+
+	parentAgent, ok := al.registry.GetAgent("parent")
+	if !ok {
+		t.Fatal("expected parent agent")
+	}
+
+	response, err := al.processSystemMessage(context.Background(), bus.InboundMessage{
+		Channel:  "system",
+		SenderID: "async_callback",
+		ChatID:   "internal-chat",
+		Content: mustJSON(t, asyncToolCallbackPayload{
+			Version:          1,
+			ToolName:         "spawn",
+			ParentAgentID:    "parent",
+			ParentSessionKey: "agent:parent:session-internal",
+			OriginChannel:    "subagent",
+			OriginChatID:     "internal-chat",
+			Content:          "subagent done",
+		}),
+	})
+	if err != nil {
+		t.Fatalf("processSystemMessage failed: %v", err)
+	}
+	if response != "" {
+		t.Fatalf("expected empty response, got %q", response)
+	}
+	if history := parentAgent.Sessions.GetHistory("agent:parent:session-internal"); len(history) != 0 {
+		t.Fatalf("expected internal callback to skip session writes, got %+v", history)
+	}
+	assertNoOutboundMessage(t, msgBus)
+}
+
+func TestProcessSystemMessage_DoesNotReturnUserResponseToRunLoop(t *testing.T) {
+	al, cfg, msgBus, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}, {ID: "parent"}}
+	al.registry = NewAgentRegistry(cfg, &simpleMockProvider{response: "background reply"})
+
+	response, err := al.processSystemMessage(context.Background(), bus.InboundMessage{
+		Channel:  "system",
+		SenderID: "async_callback",
+		ChatID:   "chat-42",
+		Content: mustJSON(t, asyncToolCallbackPayload{
+			Version:          1,
+			ToolName:         "spawn",
+			ParentAgentID:    "parent",
+			ParentSessionKey: "agent:parent:session-42",
+			OriginChannel:    "feishu",
+			OriginChatID:     "chat-42",
+			Content:          "done",
+		}),
+	})
+	if err != nil {
+		t.Fatalf("processSystemMessage failed: %v", err)
+	}
+	if response != "" {
+		t.Fatalf("expected empty response, got %q", response)
+	}
+
+	outbound := readOutboundMessage(t, msgBus)
+	if outbound.Channel != "feishu" || outbound.ChatID != "chat-42" || outbound.Content != "background reply" {
+		t.Fatalf("unexpected outbound message: %+v", outbound)
+	}
+	assertNoOutboundMessage(t, msgBus)
 }

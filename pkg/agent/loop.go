@@ -66,6 +66,16 @@ type processOptions struct {
 	NoHistory       bool     // If true, don't load session history (for heartbeat)
 }
 
+type asyncToolCallbackPayload struct {
+	Version          int    `json:"version"`
+	ToolName         string `json:"tool_name"`
+	ParentAgentID    string `json:"parent_agent_id"`
+	ParentSessionKey string `json:"parent_session_key"`
+	OriginChannel    string `json:"origin_channel"`
+	OriginChatID     string `json:"origin_chat_id"`
+	Content          string `json:"content"`
+}
+
 const (
 	defaultResponse           = "I've completed processing but have no response to give. Increase `max_tool_iterations` in config.json."
 	sessionKeyAgentPrefix     = "agent:"
@@ -806,69 +816,85 @@ func resolveScopeKey(route routing.ResolvedRoute, msgSessionKey string) string {
 	return route.SessionKey
 }
 
+func parseAsyncToolCallbackPayload(msg bus.InboundMessage) (*asyncToolCallbackPayload, error) {
+	if msg.Channel != "system" {
+		return nil, fmt.Errorf("processSystemMessage called with non-system message channel: %s", msg.Channel)
+	}
+	if msg.SenderID != "async_callback" {
+		return nil, fmt.Errorf("unsupported system sender: %s", msg.SenderID)
+	}
+
+	var payload asyncToolCallbackPayload
+	if err := json.Unmarshal([]byte(msg.Content), &payload); err != nil {
+		return nil, fmt.Errorf("invalid async callback payload json: %w", err)
+	}
+	if payload.Version != 1 {
+		return nil, fmt.Errorf("unsupported async callback payload version: %d", payload.Version)
+	}
+	if payload.ToolName == "" {
+		return nil, fmt.Errorf("missing tool_name in async callback payload")
+	}
+	if payload.ParentAgentID == "" {
+		return nil, fmt.Errorf("missing parent_agent_id in async callback payload")
+	}
+	if payload.ParentSessionKey == "" {
+		return nil, fmt.Errorf("missing parent_session_key in async callback payload")
+	}
+	if payload.OriginChannel == "" {
+		return nil, fmt.Errorf("missing origin_channel in async callback payload")
+	}
+	if payload.OriginChatID == "" {
+		return nil, fmt.Errorf("missing origin_chat_id in async callback payload")
+	}
+	if payload.Content == "" {
+		return nil, fmt.Errorf("missing content in async callback payload")
+	}
+	return &payload, nil
+}
+
 func (al *AgentLoop) processSystemMessage(
 	ctx context.Context,
 	msg bus.InboundMessage,
 ) (string, error) {
-	if msg.Channel != "system" {
-		return "", fmt.Errorf(
-			"processSystemMessage called with non-system message channel: %s",
-			msg.Channel,
-		)
+	payload, err := parseAsyncToolCallbackPayload(msg)
+	if err != nil {
+		return "", err
 	}
 
 	logger.InfoCF("agent", "Processing system message",
 		map[string]any{
-			"sender_id": msg.SenderID,
-			"chat_id":   msg.ChatID,
+			"sender_id":          msg.SenderID,
+			"chat_id":            msg.ChatID,
+			"tool_name":          payload.ToolName,
+			"parent_agent_id":    payload.ParentAgentID,
+			"parent_session_key": payload.ParentSessionKey,
 		})
 
-	// Parse origin channel from chat_id (format: "channel:chat_id")
-	var originChannel, originChatID string
-	if idx := strings.Index(msg.ChatID, ":"); idx > 0 {
-		originChannel = msg.ChatID[:idx]
-		originChatID = msg.ChatID[idx+1:]
-	} else {
-		originChannel = "cli"
-		originChatID = msg.ChatID
-	}
-
-	// Extract subagent result from message content
-	// Format: "Task 'label' completed.\n\nResult:\n<actual content>"
-	content := msg.Content
-	if idx := strings.Index(content, "Result:\n"); idx >= 0 {
-		content = content[idx+8:] // Extract just the result part
-	}
-
-	// Skip internal channels - only log, don't send to user
-	if constants.IsInternalChannel(originChannel) {
-		logger.InfoCF("agent", "Subagent completed (internal channel)",
+	if constants.IsInternalChannel(payload.OriginChannel) {
+		logger.InfoCF("agent", "Subagent completed (internal origin channel)",
 			map[string]any{
-				"sender_id":   msg.SenderID,
-				"content_len": len(content),
-				"channel":     originChannel,
+				"tool":        payload.ToolName,
+				"content_len": len(payload.Content),
+				"channel":     payload.OriginChannel,
 			})
 		return "", nil
 	}
 
-	// Use default agent for system messages
-	agent := al.GetRegistry().GetDefaultAgent()
-	if agent == nil {
-		return "", fmt.Errorf("no default agent for system message")
+	agent, ok := al.GetRegistry().GetAgent(payload.ParentAgentID)
+	if !ok {
+		return "", fmt.Errorf("parent agent not found for async callback: %s", payload.ParentAgentID)
 	}
 
-	// Use the origin session for context
-	sessionKey := routing.BuildAgentMainSessionKey(agent.ID)
-
-	return al.runAgentLoop(ctx, agent, processOptions{
-		SessionKey:      sessionKey,
-		Channel:         originChannel,
-		ChatID:          originChatID,
-		UserMessage:     fmt.Sprintf("[System: %s] %s", msg.SenderID, msg.Content),
+	_, err = al.runAgentLoop(ctx, agent, processOptions{
+		SessionKey:      payload.ParentSessionKey,
+		Channel:         payload.OriginChannel,
+		ChatID:          payload.OriginChatID,
+		UserMessage:     fmt.Sprintf("[System: async:%s] %s", payload.ToolName, payload.Content),
 		DefaultResponse: "Background task completed.",
 		EnableSummary:   false,
 		SendResponse:    true,
 	})
+	return "", err
 }
 
 // runAgentLoop is the core message processing logic.
@@ -1335,13 +1361,32 @@ func (al *AgentLoop) runLLMIteration(
 							"channel":     opts.Channel,
 						})
 
+					payload := asyncToolCallbackPayload{
+						Version:          1,
+						ToolName:         tc.Name,
+						ParentAgentID:    agent.ID,
+						ParentSessionKey: opts.SessionKey,
+						OriginChannel:    opts.Channel,
+						OriginChatID:     opts.ChatID,
+						Content:          content,
+					}
+					payloadJSON, err := json.Marshal(payload)
+					if err != nil {
+						logger.ErrorCF("agent", "Failed to marshal async callback payload",
+							map[string]any{
+								"tool":  tc.Name,
+								"error": err.Error(),
+							})
+						return
+					}
+
 					pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer pubCancel()
 					_ = al.bus.PublishInbound(pubCtx, bus.InboundMessage{
 						Channel:  "system",
-						SenderID: fmt.Sprintf("async:%s", tc.Name),
-						ChatID:   fmt.Sprintf("%s:%s", opts.Channel, opts.ChatID),
-						Content:  content,
+						SenderID: "async_callback",
+						ChatID:   opts.ChatID,
+						Content:  string(payloadJSON),
 					})
 				}
 

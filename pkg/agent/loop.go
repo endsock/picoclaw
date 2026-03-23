@@ -80,6 +80,7 @@ type asyncToolCallbackPayload struct {
 
 const (
 	defaultResponse           = "I've completed processing but have no response to give. Increase `max_tool_iterations` in config.json."
+	asyncDispatchedResponse   = "已派发智能体去处理您的需求，处理中，请稍后"
 	sessionKeyAgentPrefix     = "agent:"
 	metadataKeyAccountID      = "account_id"
 	metadataKeyGuildID        = "guild_id"
@@ -954,7 +955,7 @@ func (al *AgentLoop) runAgentLoop(
 	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
 
 	// 3. Run LLM iteration loop
-	finalContent, iteration, err := al.runLLMIteration(ctx, agent, messages, opts)
+	finalContent, iteration, hasAsyncResult, err := al.runLLMIteration(ctx, agent, messages, opts)
 	if err != nil {
 		return "", err
 	}
@@ -964,7 +965,11 @@ func (al *AgentLoop) runAgentLoop(
 
 	// 4. Handle empty response
 	if finalContent == "" {
-		finalContent = opts.DefaultResponse
+		if hasAsyncResult {
+			finalContent = asyncDispatchedResponse
+		} else {
+			finalContent = opts.DefaultResponse
+		}
 	}
 
 	// 5. Save final assistant message to session
@@ -1060,7 +1065,7 @@ func (al *AgentLoop) runLLMIteration(
 	agent *AgentInstance,
 	messages []providers.Message,
 	opts processOptions,
-) (string, int, error) {
+) (string, int, bool, error) {
 	iteration := 0
 	var finalContent string
 
@@ -1229,7 +1234,7 @@ func (al *AgentLoop) runLLMIteration(
 					"model":     activeModel,
 					"error":     err.Error(),
 				})
-			return "", iteration, fmt.Errorf("LLM call failed after retries: %w", err)
+			return "", iteration, false, fmt.Errorf("LLM call failed after retries: %w", err)
 		}
 
 		go al.handleReasoning(
@@ -1415,8 +1420,13 @@ func (al *AgentLoop) runLLMIteration(
 		}
 		wg.Wait()
 
+		hasAsyncResult := false
+
 		// Process results in original order (send to user, save to session)
 		for _, r := range agentResults {
+			if r.result.Async {
+				hasAsyncResult = true
+			}
 			// Send ForUser content to user immediately if not Silent
 			if !r.result.Silent && r.result.ForUser != "" && opts.SendResponse {
 				al.bus.PublishOutbound(ctx, bus.OutboundMessage{
@@ -1479,9 +1489,17 @@ func (al *AgentLoop) runLLMIteration(
 		logger.DebugCF("agent", "TTL tick after tool execution", map[string]any{
 			"agent_id": agent.ID, "iteration": iteration,
 		})
+
+		if hasAsyncResult {
+			logger.InfoCF("agent", "Async tool dispatched; ending current loop without default response", map[string]any{
+				"agent_id":  agent.ID,
+				"iteration": iteration,
+			})
+			return "", iteration, true, nil
+		}
 	}
 
-	return finalContent, iteration, nil
+	return finalContent, iteration, false, nil
 }
 
 // selectCandidates returns the model candidates and resolved model name to use

@@ -18,6 +18,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/workqueue"
 )
 
 type fakeChannel struct{ id string }
@@ -343,6 +344,58 @@ func (m *countingMockProvider) GetDefaultModel() string {
 	return "counting-mock-model"
 }
 
+type asyncToolCallMockProvider struct{}
+
+type spawnQueueFullMockProvider struct{}
+
+func (m *spawnQueueFullMockProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	return &providers.LLMResponse{
+		ToolCalls: []providers.ToolCall{{
+			ID:   "tool-1",
+			Type: "function",
+			Name: "spawn",
+			Function: &providers.FunctionCall{
+				Name:      "spawn",
+				Arguments: `{"task":"do async work","label":"queue-full","model_name":"claude-sonnet-4-6"}`,
+			},
+		}},
+	}, nil
+}
+
+func (m *spawnQueueFullMockProvider) GetDefaultModel() string {
+	return "spawn-queue-full-mock-model"
+}
+
+func (m *asyncToolCallMockProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	return &providers.LLMResponse{
+		ToolCalls: []providers.ToolCall{{
+			ID:   "tool-1",
+			Type: "function",
+			Name: "mock_async",
+			Function: &providers.FunctionCall{
+				Name:      "mock_async",
+				Arguments: `{}`,
+			},
+		}},
+	}, nil
+}
+
+func (m *asyncToolCallMockProvider) GetDefaultModel() string {
+	return "async-tool-call-mock-model"
+}
+
 // mockCustomTool is a simple mock tool for registration testing
 type mockCustomTool struct{}
 
@@ -363,6 +416,31 @@ func (m *mockCustomTool) Parameters() map[string]any {
 
 func (m *mockCustomTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
 	return tools.SilentResult("Custom tool executed")
+}
+
+type mockAsyncTool struct{}
+
+func (m *mockAsyncTool) Name() string {
+	return "mock_async"
+}
+
+func (m *mockAsyncTool) Description() string {
+	return "Mock async tool for testing"
+}
+
+func (m *mockAsyncTool) Parameters() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	}
+}
+
+func (m *mockAsyncTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
+	return tools.AsyncResult("async task started")
+}
+
+func (m *mockAsyncTool) ExecuteAsync(ctx context.Context, args map[string]any, cb tools.AsyncCallback) *tools.ToolResult {
+	return tools.AsyncResult("async task started")
 }
 
 // testHelper executes a message and returns the response
@@ -657,6 +735,75 @@ func TestToolResult_UserFacingToolDoesSendMessage(t *testing.T) {
 	// User-facing tool should include the output in final response
 	if response != "Command output: hello world" {
 		t.Errorf("Expected 'Command output: hello world', got: %s", response)
+	}
+}
+
+func TestProcessMessage_AsyncToolReturnsDispatchedResponse(t *testing.T) {
+	al, _, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+
+	al.registry = NewAgentRegistry(al.cfg, &asyncToolCallMockProvider{})
+	al.RegisterTool(&mockAsyncTool{})
+	helper := testHelper{al: al}
+
+	response := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:    "test",
+		SenderID:   "user1",
+		ChatID:     "chat1",
+		Content:    "do async work",
+		SessionKey: "test-session",
+	})
+
+	if response != asyncDispatchedResponse {
+		t.Fatalf("expected %q, got %q", asyncDispatchedResponse, response)
+	}
+	if strings.Contains(response, "I've completed processing but have no response to give") {
+		t.Fatalf("response should not fall back to defaultResponse: %q", response)
+	}
+}
+
+func TestProcessMessage_SpawnQueueFullSendsUserMessage(t *testing.T) {
+	al, _, msgBus, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+
+	queue := workqueue.New(1, 1)
+	if err := queue.Submit(context.Background(), workqueue.Job{
+		Name: "existing-job",
+		Run:  func(context.Context) {},
+	}); err != nil {
+		t.Fatalf("failed to prefill queue: %v", err)
+	}
+	al.SetWorkQueue(queue)
+	al.cfg.Tools.Spawn.Enabled = true
+	al.cfg.Tools.Subagent.Enabled = true
+	if err := al.ReloadProviderAndConfig(context.Background(), &spawnQueueFullMockProvider{}, al.cfg); err != nil {
+		t.Fatalf("ReloadProviderAndConfig failed: %v", err)
+	}
+
+	agent := al.GetRegistry().GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("expected default agent")
+	}
+
+	response, err := al.runAgentLoop(context.Background(), agent, processOptions{
+		SessionKey:      "agent:main:test-session",
+		Channel:         "test",
+		ChatID:          "chat1",
+		UserMessage:     "do async work",
+		DefaultResponse: defaultResponse,
+		EnableSummary:   false,
+		SendResponse:    true,
+	})
+	if err != nil {
+		t.Fatalf("runAgentLoop failed: %v", err)
+	}
+	if response == "" {
+		t.Fatal("expected final response")
+	}
+
+	outbound := readOutboundMessage(t, msgBus)
+	if outbound.Channel != "test" || outbound.ChatID != "chat1" || outbound.Content != "当前子任务队列已满，请稍后再试" {
+		t.Fatalf("unexpected outbound message: %+v", outbound)
 	}
 }
 

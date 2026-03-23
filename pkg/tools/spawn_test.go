@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/workqueue"
 )
 
 func TestSpawnTool_Execute_EmptyTask(t *testing.T) {
@@ -83,6 +85,46 @@ func TestSpawnTool_Execute_ValidTask(t *testing.T) {
 	}
 	if !result.Async {
 		t.Error("SpawnTool should return async result")
+	}
+}
+
+func TestSpawnTool_Execute_QueueFullReturnsUserMessage(t *testing.T) {
+	provider := &MockLLMProvider{}
+	queue := workqueue.New(1, 1)
+	if err := queue.Submit(context.Background(), workqueue.Job{
+		Name: "existing-job",
+		Run:  func(context.Context) {},
+	}); err != nil {
+		t.Fatalf("failed to prefill queue: %v", err)
+	}
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil, 10, queue)
+	tool := NewSpawnTool(manager)
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"task":       "Write a haiku about coding",
+		"label":      "haiku-task",
+		"model_name": "claude-sonnet-4-6",
+	})
+	if result == nil {
+		t.Fatal("Result should not be nil")
+	}
+	if !result.IsError {
+		t.Fatal("Expected error when work queue is full")
+	}
+	if result.Async {
+		t.Fatal("Queue full result should not be async")
+	}
+	if result.ForUser != "当前子任务队列已满，请稍后再试" {
+		t.Fatalf("unexpected user message: %q", result.ForUser)
+	}
+	if !strings.Contains(result.ForLLM, "failed to spawn subagent") {
+		t.Fatalf("expected LLM error context, got: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForLLM, workqueue.ErrQueueFull.Error()) {
+		t.Fatalf("expected queue full detail in ForLLM, got: %s", result.ForLLM)
+	}
+	if result.Err == nil {
+		t.Fatal("expected underlying error to be preserved")
 	}
 }
 

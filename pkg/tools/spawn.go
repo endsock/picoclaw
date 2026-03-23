@@ -2,8 +2,11 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/sipeed/picoclaw/pkg/workqueue"
 )
 
 type SpawnTool struct {
@@ -107,7 +110,11 @@ func (t *SpawnTool) execute(ctx context.Context, args map[string]any, cb AsyncCa
 	// Pass callback to manager for async completion notification
 	result, err := t.manager.Spawn(ctx, task, label, agentID, modelName, channel, chatID, cb)
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("failed to spawn subagent: %v", err))
+		toolResult := ErrorResult(fmt.Sprintf("failed to spawn subagent: %v", err)).WithError(err)
+		if errors.Is(err, workqueue.ErrQueueFull) {
+			toolResult.ForUser = "当前子任务队列已满，请稍后再试"
+		}
+		return toolResult
 	}
 
 	// Return AsyncResult since the task runs in background

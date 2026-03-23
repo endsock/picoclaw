@@ -2,10 +2,14 @@ package workqueue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 )
+
+// ErrQueueFull is returned by Submit when the queue channel is at capacity.
+var ErrQueueFull = errors.New("work queue is full")
 
 const defaultPendingPreviewLimit = 16
 
@@ -103,7 +107,7 @@ func (q *Queue) Submit(ctx context.Context, job Job) error {
 		return nil
 	default:
 		q.rejectedTotal.Add(1)
-		return fmt.Errorf("work queue is full")
+		return ErrQueueFull
 	}
 }
 

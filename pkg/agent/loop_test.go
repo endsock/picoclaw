@@ -51,7 +51,7 @@ func newTestAgentLoop(
 	}
 	msgBus = bus.NewMessageBus()
 	provider = &mockProvider{}
-	al = NewAgentLoop(cfg, msgBus, provider)
+	al = NewAgentLoop(cfg, msgBus, provider, nil)
 	return al, cfg, msgBus, provider, func() { os.RemoveAll(tmpDir) }
 }
 
@@ -66,7 +66,7 @@ func TestRecordLastChannel(t *testing.T) {
 	if got := al.state.GetLastChannel(); got != testChannel {
 		t.Errorf("Expected channel '%s', got '%s'", testChannel, got)
 	}
-	al2 := NewAgentLoop(cfg, msgBus, provider)
+	al2 := NewAgentLoop(cfg, msgBus, provider, nil)
 	if got := al2.state.GetLastChannel(); got != testChannel {
 		t.Errorf("Expected persistent channel '%s', got '%s'", testChannel, got)
 	}
@@ -83,7 +83,7 @@ func TestRecordLastChatID(t *testing.T) {
 	if got := al.state.GetLastChatID(); got != testChatID {
 		t.Errorf("Expected chat ID '%s', got '%s'", testChatID, got)
 	}
-	al2 := NewAgentLoop(cfg, msgBus, provider)
+	al2 := NewAgentLoop(cfg, msgBus, provider, nil)
 	if got := al2.state.GetLastChatID(); got != testChatID {
 		t.Errorf("Expected persistent chat ID '%s', got '%s'", testChatID, got)
 	}
@@ -112,7 +112,7 @@ func TestNewAgentLoop_StateInitialized(t *testing.T) {
 	// Create agent loop
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := NewAgentLoop(cfg, msgBus, provider, nil)
 
 	// Verify state manager is initialized
 	if al.state == nil {
@@ -147,7 +147,7 @@ func TestToolRegistry_ToolRegistration(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := NewAgentLoop(cfg, msgBus, provider, nil)
 
 	// Register a custom tool
 	customTool := &mockCustomTool{}
@@ -204,7 +204,7 @@ func TestToolRegistry_GetDefinitions(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := NewAgentLoop(cfg, msgBus, provider, nil)
 
 	// Register a test tool and verify it shows up in startup info
 	testTool := &mockCustomTool{}
@@ -237,7 +237,7 @@ func TestAgentLoop_GetStartupInfo(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := NewAgentLoop(cfg, msgBus, provider, nil)
 
 	info := al.GetStartupInfo()
 
@@ -284,7 +284,7 @@ func TestAgentLoop_Stop(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := NewAgentLoop(cfg, msgBus, provider, nil)
 
 	// Note: running is only set to true when Run() is called
 	// We can't test that without starting the event loop
@@ -404,7 +404,7 @@ func TestProcessMessage_UsesRouteSessionKey(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &simpleMockProvider{response: "ok"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := NewAgentLoop(cfg, msgBus, provider, nil)
 
 	msg := bus.InboundMessage{
 		Channel:  "telegram",
@@ -463,7 +463,7 @@ func TestProcessMessage_CommandOutcomes(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &countingMockProvider{response: "LLM reply"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := NewAgentLoop(cfg, msgBus, provider, nil)
 	helper := testHelper{al: al}
 
 	baseMsg := bus.InboundMessage{
@@ -540,7 +540,7 @@ func TestProcessMessage_SwitchModelShowModelConsistency(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &countingMockProvider{response: "LLM reply"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := NewAgentLoop(cfg, msgBus, provider, nil)
 	helper := testHelper{al: al}
 
 	switchResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
@@ -597,7 +597,7 @@ func TestToolResult_SilentToolDoesNotSendUserMessage(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &simpleMockProvider{response: "File operation complete"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := NewAgentLoop(cfg, msgBus, provider, nil)
 	helper := testHelper{al: al}
 
 	// ReadFileTool returns SilentResult, which should not send user message
@@ -639,7 +639,7 @@ func TestToolResult_UserFacingToolDoesSendMessage(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &simpleMockProvider{response: "Command output: hello world"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := NewAgentLoop(cfg, msgBus, provider, nil)
 	helper := testHelper{al: al}
 
 	// ExecTool returns UserResult, which should send user message
@@ -718,7 +718,7 @@ func TestAgentLoop_ContextExhaustionRetry(t *testing.T) {
 		successResp: "Recovered from context error",
 	}
 
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := NewAgentLoop(cfg, msgBus, provider, nil)
 
 	// Inject some history to simulate a full context
 	sessionKey := "test-session-context"
@@ -804,7 +804,7 @@ func TestProcessDirectWithChannel_TriggersMCPInitialization(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := NewAgentLoop(cfg, msgBus, provider, nil)
 	defer al.Close()
 
 	if al.mcp.hasManager() {
@@ -846,7 +846,7 @@ func TestTargetReasoningChannelID_AllChannels(t *testing.T) {
 		},
 	}
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{}, nil)
 	chManager, err := channels.NewManager(&config.Config{}, bus.NewMessageBus(), nil)
 	if err != nil {
 		t.Fatalf("Failed to create channel manager: %v", err)
@@ -916,7 +916,7 @@ func TestHandleReasoning(t *testing.T) {
 			},
 		}
 		msgBus := bus.NewMessageBus()
-		return NewAgentLoop(cfg, msgBus, &mockProvider{}), msgBus
+		return NewAgentLoop(cfg, msgBus, &mockProvider{}, nil), msgBus
 	}
 
 	t.Run("skips when any required field is empty", func(t *testing.T) {

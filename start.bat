@@ -1,0 +1,1 @@
+.\build\picoclaw-launcher.exe -public -no-browser

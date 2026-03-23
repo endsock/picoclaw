@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -39,6 +41,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/voice"
+	"github.com/sipeed/picoclaw/pkg/workqueue"
 )
 
 // Timeout constants for service operations
@@ -57,6 +60,8 @@ type gatewayServices struct {
 	ChannelManager   *channels.Manager
 	DeviceService    *devices.Service
 	HealthServer     *health.Server
+	WorkQueue        *workqueue.Queue
+	workQueueCancel  context.CancelFunc
 }
 
 func gatewayCmd(debug bool) error {
@@ -82,7 +87,7 @@ func gatewayCmd(debug bool) error {
 	}
 
 	msgBus := bus.NewMessageBus()
-	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
+	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider, nil)
 
 	// Print agent startup info
 	fmt.Println("\n📦 Agent Status:")
@@ -105,6 +110,10 @@ func gatewayCmd(debug bool) error {
 	// Setup and start all services
 	services, err := setupAndStartServices(cfg, agentLoop, msgBus)
 	if err != nil {
+		return err
+	}
+	if err := reloadAgentLoopWithWorkQueue(agentLoop, provider, cfg, services.WorkQueue); err != nil {
+		stopAndCleanupServices(services, serviceShutdownTimeout)
 		return err
 	}
 
@@ -147,6 +156,7 @@ func setupAndStartServices(
 	msgBus *bus.MessageBus,
 ) (*gatewayServices, error) {
 	services := &gatewayServices{}
+	services.setupWorkQueue(cfg)
 
 	// Setup cron tool and service
 	execTimeout := time.Duration(cfg.Tools.Cron.ExecTimeoutMinutes) * time.Minute
@@ -157,8 +167,10 @@ func setupAndStartServices(
 		cfg.Agents.Defaults.RestrictToWorkspace,
 		execTimeout,
 		cfg,
+		services.WorkQueue,
 	)
 	if err := services.CronService.Start(); err != nil {
+		services.stopWorkQueue()
 		return nil, fmt.Errorf("error starting cron service: %w", err)
 	}
 	fmt.Println("✓ Cron service started")
@@ -190,6 +202,7 @@ func setupAndStartServices(
 		return tools.SilentResult(response)
 	})
 	if err := services.HeartbeatService.Start(); err != nil {
+		services.stopWorkQueue()
 		return nil, fmt.Errorf("error starting heartbeat service: %w", err)
 	}
 	fmt.Println("✓ Heartbeat service started")
@@ -213,6 +226,7 @@ func setupAndStartServices(
 		if fms, ok := services.MediaStore.(*media.FileMediaStore); ok {
 			fms.Stop()
 		}
+		services.stopWorkQueue()
 		return nil, fmt.Errorf("error creating channel manager: %w", err)
 	}
 
@@ -237,8 +251,10 @@ func setupAndStartServices(
 	addr := fmt.Sprintf("%s:%d", cfg.Gateway.Host, cfg.Gateway.Port)
 	services.HealthServer = health.NewServer(cfg.Gateway.Host, cfg.Gateway.Port)
 	services.ChannelManager.SetupHTTPServer(addr, services.HealthServer)
+	registerWorkerQueueDebugRoute(services)
 
 	if err := services.ChannelManager.StartAll(context.Background()); err != nil {
+		services.stopWorkQueue()
 		return nil, fmt.Errorf("error starting channels: %w", err)
 	}
 
@@ -280,6 +296,7 @@ func stopAndCleanupServices(
 	if services.CronService != nil {
 		services.CronService.Stop()
 	}
+	services.stopWorkQueue()
 	if services.MediaStore != nil {
 		// Stop the media store if it's a FileMediaStore with cleanup
 		if fms, ok := services.MediaStore.(*media.FileMediaStore); ok {
@@ -347,6 +364,9 @@ func handleConfigReload(
 		newCfg.Agents.Defaults.ModelName = newModelID
 	}
 
+	services.setupWorkQueue(newCfg)
+	al.SetWorkQueue(services.WorkQueue)
+
 	// Use the atomic reload method on AgentLoop to safely swap provider and config.
 	// This handles locking internally to prevent races with in-flight LLM calls
 	// and concurrent reads of registry/config while the swap occurs.
@@ -356,6 +376,7 @@ func handleConfigReload(
 	if err := al.ReloadProviderAndConfig(reloadCtx, newProvider, newCfg); err != nil {
 		logger.Errorf("  ⚠ Error reloading agent loop: %v", err)
 		// Close the newly created provider since it wasn't adopted
+		services.stopWorkQueue()
 		if cp, ok := newProvider.(providers.StatefulProvider); ok {
 			cp.Close()
 		}
@@ -393,6 +414,9 @@ func restartServices(
 
 	// Get current config from agent loop (which has been updated if this is a reload)
 	cfg := al.GetConfig()
+	if err := reloadAgentLoopWithWorkQueue(al, currentProvider(al), cfg, services.WorkQueue); err != nil {
+		return err
+	}
 
 	// Re-create and start cron service with new config
 	execTimeout := time.Duration(cfg.Tools.Cron.ExecTimeoutMinutes) * time.Minute
@@ -403,6 +427,7 @@ func restartServices(
 		cfg.Agents.Defaults.RestrictToWorkspace,
 		execTimeout,
 		cfg,
+		services.WorkQueue,
 	)
 	if err := services.CronService.Start(); err != nil {
 		return fmt.Errorf("error restarting cron service: %w", err)
@@ -476,6 +501,7 @@ func restartServices(
 	addr := fmt.Sprintf("%s:%d", cfg.Gateway.Host, cfg.Gateway.Port)
 	services.HealthServer = health.NewServer(cfg.Gateway.Host, cfg.Gateway.Port)
 	services.ChannelManager.SetupHTTPServer(addr, services.HealthServer)
+	registerWorkerQueueDebugRoute(services)
 
 	if err := services.ChannelManager.StartAll(ctx); err != nil {
 		return fmt.Errorf("error restarting channels: %w", err)
@@ -509,6 +535,65 @@ func restartServices(
 	}
 
 	return nil
+}
+
+func (services *gatewayServices) setupWorkQueue(cfg *config.Config) {
+	services.stopWorkQueue()
+	if !cfg.WorkerQueue.Enabled {
+		services.WorkQueue = nil
+		return
+	}
+	queue := workqueue.New(cfg.WorkerQueue.QueueSize, cfg.WorkerQueue.Workers)
+	ctx, cancel := context.WithCancel(context.Background())
+	queue.Start(ctx)
+	services.WorkQueue = queue
+	services.workQueueCancel = cancel
+}
+
+func (services *gatewayServices) stopWorkQueue() {
+	if services.workQueueCancel != nil {
+		services.workQueueCancel()
+		services.workQueueCancel = nil
+	}
+	if services.WorkQueue != nil {
+		services.WorkQueue.Stop()
+		services.WorkQueue = nil
+	}
+}
+
+func registerWorkerQueueDebugRoute(services *gatewayServices) {
+	if services.ChannelManager == nil {
+		return
+	}
+	services.ChannelManager.HandleHTTPFunc("/debug/worker-queue", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if services.WorkQueue == nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"enabled": false})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(services.WorkQueue.Snapshot())
+	})
+}
+
+func reloadAgentLoopWithWorkQueue(
+	al *agent.AgentLoop,
+	provider providers.LLMProvider,
+	cfg *config.Config,
+	queue *workqueue.Queue,
+) error {
+	al.SetWorkQueue(queue)
+	reloadCtx, reloadCancel := context.WithTimeout(context.Background(), providerReloadTimeout)
+	defer reloadCancel()
+	return al.ReloadProviderAndConfig(reloadCtx, provider, cfg)
+}
+
+func currentProvider(al *agent.AgentLoop) providers.LLMProvider {
+	registry := al.GetRegistry()
+	defaultAgent := registry.GetDefaultAgent()
+	if defaultAgent == nil {
+		return nil
+	}
+	return defaultAgent.Provider
 }
 
 // setupConfigWatcherPolling sets up a simple polling-based config file watcher
@@ -613,11 +698,12 @@ func setupCronTool(
 	restrict bool,
 	execTimeout time.Duration,
 	cfg *config.Config,
+	queue *workqueue.Queue,
 ) *cron.CronService {
 	cronStorePath := filepath.Join(workspace, "cron", "jobs.json")
 
 	// Create cron service
-	cronService := cron.NewCronService(cronStorePath, nil)
+	cronService := cron.NewCronService(cronStorePath, nil, queue)
 
 	// Create and register CronTool if enabled
 	var cronTool *tools.CronTool

@@ -351,6 +351,20 @@ func (m *Manager) SetupHTTPServer(addr string, healthServer *health.Server) {
 	}
 }
 
+func (m *Manager) HandleHTTP(pattern string, handler http.Handler) {
+	if m.mux == nil {
+		return
+	}
+	m.mux.Handle(pattern, handler)
+}
+
+func (m *Manager) HandleHTTPFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	if m.mux == nil {
+		return
+	}
+	m.mux.HandleFunc(pattern, handler)
+}
+
 func (m *Manager) StartAll(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

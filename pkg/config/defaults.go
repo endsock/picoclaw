@@ -398,6 +398,11 @@ func DefaultConfig() *Config {
 			Host: "127.0.0.1",
 			Port: 18790,
 		},
+		WorkerQueue: WorkerQueueConfig{
+			Enabled:   true,
+			Workers:   4,
+			QueueSize: 128,
+		},
 		Tools: ToolsConfig{
 			MediaCleanup: MediaCleanupConfig{
 				ToolConfig: ToolConfig{

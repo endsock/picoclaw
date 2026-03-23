@@ -33,6 +33,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
 	"github.com/sipeed/picoclaw/pkg/voice"
+	"github.com/sipeed/picoclaw/pkg/workqueue"
 )
 
 type AgentLoop struct {
@@ -49,6 +50,7 @@ type AgentLoop struct {
 	cmdRegistry    *commands.Registry
 	mcp            mcpRuntime
 	mu             sync.RWMutex
+	workQueue      *workqueue.Queue
 	// Track active requests for safe provider cleanup
 	activeRequests sync.WaitGroup
 }
@@ -90,11 +92,12 @@ func NewAgentLoop(
 	cfg *config.Config,
 	msgBus *bus.MessageBus,
 	provider providers.LLMProvider,
+	workQueue *workqueue.Queue,
 ) *AgentLoop {
 	registry := NewAgentRegistry(cfg, provider)
 
 	// Register shared tools to all agents
-	registerSharedTools(cfg, msgBus, registry, provider)
+	registerSharedTools(cfg, msgBus, registry, provider, workQueue)
 
 	// Set up shared fallback chain
 	cooldown := providers.NewCooldownTracker()
@@ -115,6 +118,7 @@ func NewAgentLoop(
 		summarizing: sync.Map{},
 		fallback:    fallbackChain,
 		cmdRegistry: commands.NewRegistry(commands.BuiltinDefinitions()),
+		workQueue:   workQueue,
 	}
 
 	return al
@@ -126,6 +130,7 @@ func registerSharedTools(
 	msgBus *bus.MessageBus,
 	registry *AgentRegistry,
 	provider providers.LLMProvider,
+	workQueue *workqueue.Queue,
 ) {
 	for _, agentID := range registry.ListAgentIDs() {
 		agent, ok := registry.GetAgent(agentID)
@@ -235,7 +240,7 @@ func registerSharedTools(
 		// Spawn tool with allowlist checker
 		if cfg.Tools.IsToolEnabled("spawn") {
 			if cfg.Tools.IsToolEnabled("subagent") {
-				subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace, agent.Tools, cfg.Agents.Defaults.SubagentMaxIterations)
+				subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace, agent.Tools, cfg.Agents.Defaults.SubagentMaxIterations, workQueue)
 				subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
 
 				// 注入 AgentLookup 接口，使 subagent 可以查询目标 agent 的配置
@@ -408,6 +413,7 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	var registry *AgentRegistry
 	var panicErr error
 	done := make(chan struct{}, 1)
+	workQueue := al.workQueue
 
 	go func() {
 		defer func() {
@@ -441,7 +447,7 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	}
 
 	// Ensure shared tools are re-registered on the new registry
-	registerSharedTools(cfg, al.bus, registry, provider)
+	registerSharedTools(cfg, al.bus, registry, provider, workQueue)
 
 	// Atomically swap the config and registry under write lock
 	// This ensures readers see a consistent pair
@@ -513,6 +519,12 @@ func (al *AgentLoop) SetMediaStore(s media.MediaStore) {
 // SetTranscriber injects a voice transcriber for agent-level audio transcription.
 func (al *AgentLoop) SetTranscriber(t voice.Transcriber) {
 	al.transcriber = t
+}
+
+func (al *AgentLoop) SetWorkQueue(queue *workqueue.Queue) {
+	al.mu.Lock()
+	defer al.mu.Unlock()
+	al.workQueue = queue
 }
 
 var audioAnnotationRe = regexp.MustCompile(`\[(voice|audio)(?::[^\]]*)?\]`)

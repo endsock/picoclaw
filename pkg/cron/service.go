@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"github.com/adhocore/gronx"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/workqueue"
 )
 
 type CronSchedule struct {
@@ -66,13 +68,15 @@ type CronService struct {
 	running   bool
 	stopChan  chan struct{}
 	gronx     *gronx.Gronx
+	workQueue *workqueue.Queue
 }
 
-func NewCronService(storePath string, onJob JobHandler) *CronService {
+func NewCronService(storePath string, onJob JobHandler, workQueue *workqueue.Queue) *CronService {
 	cs := &CronService{
 		storePath: storePath,
 		onJob:     onJob,
 		gronx:     gronx.New(),
+		workQueue: workQueue,
 	}
 	// Initialize and load store on creation
 	cs.loadStore()
@@ -166,10 +170,23 @@ func (cs *CronService) checkJobs() {
 		log.Printf("[cron] failed to save store: %v", err)
 	}
 
+	workQueue := cs.workQueue
 	cs.mu.Unlock()
 
 	// Execute jobs outside lock.
 	for _, jobID := range dueJobIDs {
+		if workQueue != nil {
+			err := workQueue.Submit(context.Background(), workqueue.Job{
+				Name: fmt.Sprintf("cron:%s", jobID),
+				Run: func(_ context.Context) {
+					cs.executeJobByID(jobID)
+				},
+			})
+			if err != nil {
+				cs.markJobEnqueueError(jobID, err)
+			}
+			continue
+		}
 		cs.executeJobByID(jobID)
 	}
 }
@@ -260,6 +277,40 @@ func (cs *CronService) executeJobByID(jobID string) {
 
 	if err := cs.saveStoreUnsafe(); err != nil {
 		log.Printf("[cron] failed to save store: %v", err)
+	}
+}
+
+func (cs *CronService) markJobEnqueueError(jobID string, err error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	for i := range cs.store.Jobs {
+		job := &cs.store.Jobs[i]
+		if job.ID != jobID {
+			continue
+		}
+
+		now := time.Now().UnixMilli()
+		job.State.LastRunAtMS = &now
+		job.State.LastStatus = "error"
+		job.State.LastError = fmt.Sprintf("failed to enqueue job: %v", err)
+		job.UpdatedAtMS = now
+
+		if job.Schedule.Kind == "at" {
+			if job.DeleteAfterRun {
+				cs.removeJobUnsafe(job.ID)
+			} else {
+				job.Enabled = false
+				job.State.NextRunAtMS = nil
+			}
+		} else {
+			job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
+		}
+
+		if saveErr := cs.saveStoreUnsafe(); saveErr != nil {
+			log.Printf("[cron] failed to save store after enqueue error: %v", saveErr)
+		}
+		return
 	}
 }
 

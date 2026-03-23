@@ -75,17 +75,18 @@ func (f *FlexibleStringSlice) UnmarshalText(text []byte) error {
 }
 
 type Config struct {
-	Agents    AgentsConfig    `json:"agents"`
-	Bindings  []AgentBinding  `json:"bindings,omitempty"`
-	Session   SessionConfig   `json:"session,omitempty"`
-	Channels  ChannelsConfig  `json:"channels"`
-	Providers ProvidersConfig `json:"providers,omitempty"`
-	ModelList []ModelConfig   `json:"model_list"` // New model-centric provider configuration
-	Gateway   GatewayConfig   `json:"gateway"`
-	Tools     ToolsConfig     `json:"tools"`
-	Heartbeat HeartbeatConfig `json:"heartbeat"`
-	Devices   DevicesConfig   `json:"devices"`
-	Voice     VoiceConfig     `json:"voice"`
+	Agents      AgentsConfig      `json:"agents"`
+	Bindings    []AgentBinding    `json:"bindings,omitempty"`
+	Session     SessionConfig     `json:"session,omitempty"`
+	Channels    ChannelsConfig    `json:"channels"`
+	Providers   ProvidersConfig   `json:"providers,omitempty"`
+	ModelList   []ModelConfig     `json:"model_list"` // New model-centric provider configuration
+	Gateway     GatewayConfig     `json:"gateway"`
+	WorkerQueue WorkerQueueConfig `json:"worker_queue"`
+	Tools       ToolsConfig       `json:"tools"`
+	Heartbeat   HeartbeatConfig   `json:"heartbeat"`
+	Devices     DevicesConfig     `json:"devices"`
+	Voice       VoiceConfig       `json:"voice"`
 	// BuildInfo contains build-time version information
 	BuildInfo BuildInfo `json:"build_info,omitempty"`
 }
@@ -626,6 +627,12 @@ func (c *ModelConfig) Validate() error {
 type GatewayConfig struct {
 	Host string `json:"host" env:"PICOCLAW_GATEWAY_HOST"`
 	Port int    `json:"port" env:"PICOCLAW_GATEWAY_PORT"`
+}
+
+type WorkerQueueConfig struct {
+	Enabled   bool `json:"enabled" env:"PICOCLAW_WORKER_QUEUE_ENABLED"`
+	Workers   int  `json:"workers" env:"PICOCLAW_WORKER_QUEUE_WORKERS"`
+	QueueSize int  `json:"queue_size" env:"PICOCLAW_WORKER_QUEUE_QUEUE_SIZE"`
 }
 
 type ToolDiscoveryConfig struct {

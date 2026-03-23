@@ -46,7 +46,7 @@ func (m *MockLLMProvider) GetContextWindow() int {
 
 func TestSubagentManager_SetLLMOptions_AppliesToRunToolLoop(t *testing.T) {
 	provider := &MockLLMProvider{}
-	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil)
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil, 10, nil)
 	manager.SetLLMOptions(2048, 0.6)
 	tool := NewSubagentTool(manager)
 
@@ -72,7 +72,7 @@ func TestSubagentManager_SetLLMOptions_AppliesToRunToolLoop(t *testing.T) {
 // TestSubagentTool_Name verifies tool name
 func TestSubagentTool_Name(t *testing.T) {
 	provider := &MockLLMProvider{}
-	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil)
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil, 10, nil)
 	tool := NewSubagentTool(manager)
 
 	if tool.Name() != "subagent" {
@@ -83,7 +83,7 @@ func TestSubagentTool_Name(t *testing.T) {
 // TestSubagentTool_Description verifies tool description
 func TestSubagentTool_Description(t *testing.T) {
 	provider := &MockLLMProvider{}
-	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil)
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil, 10, nil)
 	tool := NewSubagentTool(manager)
 
 	desc := tool.Description()
@@ -98,7 +98,7 @@ func TestSubagentTool_Description(t *testing.T) {
 // TestSubagentTool_Parameters verifies tool parameters schema
 func TestSubagentTool_Parameters(t *testing.T) {
 	provider := &MockLLMProvider{}
-	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil)
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil, 10, nil)
 	tool := NewSubagentTool(manager)
 
 	params := tool.Parameters()
@@ -170,7 +170,7 @@ func TestSubagentTool_Parameters(t *testing.T) {
 // TestSubagentTool_Execute_Success tests successful execution
 func TestSubagentTool_Execute_Success(t *testing.T) {
 	provider := &MockLLMProvider{}
-	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil)
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil, 10, nil)
 	tool := NewSubagentTool(manager)
 
 	ctx := WithToolContext(context.Background(), "telegram", "chat-123")
@@ -225,7 +225,7 @@ func TestSubagentTool_Execute_Success(t *testing.T) {
 // TestSubagentTool_Execute_NoLabel tests execution without label
 func TestSubagentTool_Execute_NoLabel(t *testing.T) {
 	provider := &MockLLMProvider{}
-	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil)
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil, 10, nil)
 	tool := NewSubagentTool(manager)
 
 	ctx := context.Background()
@@ -249,7 +249,7 @@ func TestSubagentTool_Execute_NoLabel(t *testing.T) {
 // TestSubagentTool_Execute_MissingTask tests error handling for missing task
 func TestSubagentTool_Execute_MissingTask(t *testing.T) {
 	provider := &MockLLMProvider{}
-	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil)
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil, 10, nil)
 	tool := NewSubagentTool(manager)
 
 	ctx := context.Background()
@@ -279,7 +279,7 @@ func TestSubagentTool_Execute_MissingTask(t *testing.T) {
 // TestSubagentTool_Execute_MissingModelName tests error handling for missing model_name
 func TestSubagentTool_Execute_MissingModelName(t *testing.T) {
 	provider := &MockLLMProvider{}
-	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil)
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil, 10, nil)
 	tool := NewSubagentTool(manager)
 
 	ctx := context.Background()
@@ -324,7 +324,7 @@ func TestSubagentTool_Execute_NilManager(t *testing.T) {
 // TestSubagentTool_Execute_ContextPassing verifies context is properly used
 func TestSubagentTool_Execute_ContextPassing(t *testing.T) {
 	provider := &MockLLMProvider{}
-	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil)
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil, 10, nil)
 	tool := NewSubagentTool(manager)
 
 	channel := "test-channel"
@@ -347,7 +347,7 @@ func TestSubagentTool_Execute_ContextPassing(t *testing.T) {
 func TestSubagentTool_ForUserTruncation(t *testing.T) {
 	// Create a mock provider that returns very long content
 	provider := &MockLLMProvider{}
-	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil)
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test", nil, 10, nil)
 	tool := NewSubagentTool(manager)
 
 	ctx := context.Background()

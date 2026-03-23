@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/workqueue"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,7 @@ type SubagentManager struct {
 	hasMaxTokens   bool
 	hasTemperature bool
 	nextID         int
+	workQueue      *workqueue.Queue
 
 	// 新增字段
 	agentLookup AgentLookup // 用于通过 agent_id 查询 agent 配置
@@ -73,6 +75,7 @@ func NewSubagentManager(
 	defaultModel, workspace string,
 	parentTools *ToolRegistry,
 	maxIterations int,
+	workQueue *workqueue.Queue,
 ) *SubagentManager {
 	if parentTools == nil {
 		parentTools = NewToolRegistry()
@@ -88,6 +91,7 @@ func NewSubagentManager(
 		tools:         parentTools,
 		maxIterations: maxIterations,
 		nextID:        1,
+		workQueue:     workQueue,
 	}
 }
 
@@ -129,8 +133,6 @@ func (sm *SubagentManager) Spawn(
 	callback AsyncCallback,
 ) (string, error) {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
 	taskID := fmt.Sprintf("subagent-%d", sm.nextID)
 	sm.nextID++
 
@@ -146,9 +148,30 @@ func (sm *SubagentManager) Spawn(
 		Created:       time.Now().UnixMilli(),
 	}
 	sm.tasks[taskID] = subagentTask
+	workQueue := sm.workQueue
+	sm.mu.Unlock()
 
-	// Start task in background with context cancellation support
-	go sm.runTask(ctx, subagentTask, callback)
+	if workQueue != nil {
+		jobName := taskID
+		if label != "" {
+			jobName = fmt.Sprintf("%s (%s)", taskID, label)
+		}
+		if err := workQueue.Submit(ctx, workqueue.Job{
+			Name: jobName,
+			Run: func(runCtx context.Context) {
+				sm.runTask(runCtx, subagentTask, callback)
+			},
+		}); err != nil {
+			sm.mu.Lock()
+			subagentTask.Status = "failed"
+			subagentTask.Result = fmt.Sprintf("failed to enqueue subagent: %v", err)
+			sm.mu.Unlock()
+			return "", fmt.Errorf("failed to enqueue subagent: %w", err)
+		}
+	} else {
+		// Start task in background with context cancellation support
+		go sm.runTask(ctx, subagentTask, callback)
+	}
 
 	if label != "" {
 		return fmt.Sprintf("Spawned subagent '%s' for task: %s", label, task), nil

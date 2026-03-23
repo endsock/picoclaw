@@ -72,9 +72,13 @@ func NewSubagentManager(
 	provider providers.LLMProvider,
 	defaultModel, workspace string,
 	parentTools *ToolRegistry,
+	maxIterations int,
 ) *SubagentManager {
 	if parentTools == nil {
 		parentTools = NewToolRegistry()
+	}
+	if maxIterations <= 0 {
+		maxIterations = 10
 	}
 	return &SubagentManager{
 		tasks:         make(map[string]*SubagentTask),
@@ -82,7 +86,7 @@ func NewSubagentManager(
 		defaultModel:  defaultModel,
 		workspace:     workspace,
 		tools:         parentTools,
-		maxIterations: 10,
+		maxIterations: maxIterations,
 		nextID:        1,
 	}
 }

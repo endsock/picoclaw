@@ -225,7 +225,7 @@ func registerSharedTools(
 		// Spawn tool with allowlist checker
 		if cfg.Tools.IsToolEnabled("spawn") {
 			if cfg.Tools.IsToolEnabled("subagent") {
-				subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace, agent.Tools)
+				subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace, agent.Tools, cfg.Agents.Defaults.SubagentMaxIterations)
 				subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
 
 				// 注入 AgentLookup 接口，使 subagent 可以查询目标 agent 的配置

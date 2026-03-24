@@ -624,9 +624,21 @@ func (c *ModelConfig) Validate() error {
 	return nil
 }
 
+type SpawnAPIConfig struct {
+	Enabled bool `json:"enabled" env:"PICOCLAW_GATEWAY_SPAWN_API_ENABLED"`
+}
+
+type OutboundWebhookConfig struct {
+	DefaultTimeoutMS  int `json:"default_timeout_ms" env:"PICOCLAW_GATEWAY_OUTBOUND_WEBHOOK_DEFAULT_TIMEOUT_MS"`
+	DefaultMaxRetries int `json:"default_max_retries" env:"PICOCLAW_GATEWAY_OUTBOUND_WEBHOOK_DEFAULT_MAX_RETRIES"`
+	MaxPayloadBytes   int `json:"max_payload_bytes" env:"PICOCLAW_GATEWAY_OUTBOUND_WEBHOOK_MAX_PAYLOAD_BYTES"`
+}
+
 type GatewayConfig struct {
-	Host string `json:"host" env:"PICOCLAW_GATEWAY_HOST"`
-	Port int    `json:"port" env:"PICOCLAW_GATEWAY_PORT"`
+	Host            string                `json:"host" env:"PICOCLAW_GATEWAY_HOST"`
+	Port            int                   `json:"port" env:"PICOCLAW_GATEWAY_PORT"`
+	SpawnAPI        SpawnAPIConfig        `json:"spawn_api"`
+	OutboundWebhook OutboundWebhookConfig `json:"outbound_webhook"`
 }
 
 type WorkerQueueConfig struct {

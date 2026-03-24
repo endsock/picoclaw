@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const maxRetries = 3
+const defaultMaxRetries = 3
 
 var retryDelayUnit = time.Second
 
@@ -17,6 +17,14 @@ func shouldRetry(statusCode int) bool {
 }
 
 func DoRequestWithRetry(client *http.Client, req *http.Request) (*http.Response, error) {
+	return DoRequestWithRetryMaxRetries(client, req, defaultMaxRetries)
+}
+
+func DoRequestWithRetryMaxRetries(client *http.Client, req *http.Request, maxRetries int) (*http.Response, error) {
+	if maxRetries <= 0 {
+		maxRetries = defaultMaxRetries
+	}
+
 	var resp *http.Response
 	var err error
 
@@ -25,7 +33,12 @@ func DoRequestWithRetry(client *http.Client, req *http.Request) (*http.Response,
 			resp.Body.Close()
 		}
 
-		resp, err = client.Do(req)
+		attemptReq, reqErr := cloneRequestForRetry(req)
+		if reqErr != nil {
+			return nil, reqErr
+		}
+
+		resp, err = client.Do(attemptReq)
 		if err == nil {
 			if resp.StatusCode == http.StatusOK {
 				break
@@ -45,6 +58,19 @@ func DoRequestWithRetry(client *http.Client, req *http.Request) (*http.Response,
 		}
 	}
 	return resp, err
+}
+
+func cloneRequestForRetry(req *http.Request) (*http.Request, error) {
+	cloned := req.Clone(req.Context())
+	if req.Body == nil || req.GetBody == nil {
+		return cloned, nil
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, fmt.Errorf("failed to clone request body: %w", err)
+	}
+	cloned.Body = body
+	return cloned, nil
 }
 
 func sleepWithCtx(ctx context.Context, d time.Duration) error {

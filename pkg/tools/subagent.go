@@ -3,16 +3,17 @@ package tools
 import (
 	"context"
 	"fmt"
-	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/workqueue"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
+	webhookpkg "github.com/sipeed/picoclaw/pkg/webhook"
+	"github.com/sipeed/picoclaw/pkg/workqueue"
 )
 
 // AgentLookup 提供通过 agent_id 查询 agent 配置的能力
@@ -38,17 +39,48 @@ type subagentConfig struct {
 	tools       *ToolRegistry
 }
 
+type SubagentWebhook struct {
+	URL        string
+	Headers    map[string]string
+	Events     map[string]bool
+	TimeoutMS  int
+	MaxRetries int
+}
+
+type SpawnRequest struct {
+	Task          string
+	Label         string
+	AgentID       string
+	ModelName     string
+	Source        string
+	Metadata      map[string]string
+	Webhook       *SubagentWebhook
+	OriginChannel string
+	OriginChatID  string
+}
+
 type SubagentTask struct {
 	ID            string
 	Task          string
 	Label         string
 	AgentID       string
-	ModelName     string // 新增：指定的模型名称（必传）
+	ModelName     string
 	OriginChannel string
 	OriginChatID  string
 	Status        string
 	Result        string
+	Error         string
 	Created       int64
+	Finished      int64
+	Source        string
+	Metadata      map[string]string
+	Webhook       *SubagentWebhook
+}
+
+type SubagentWebhookConfig struct {
+	DefaultTimeoutMS  int
+	DefaultMaxRetries int
+	MaxPayloadBytes   int
 }
 
 type SubagentManager struct {
@@ -67,7 +99,9 @@ type SubagentManager struct {
 	workQueue      *workqueue.Queue
 
 	// 新增字段
-	agentLookup AgentLookup // 用于通过 agent_id 查询 agent 配置
+	agentLookup   AgentLookup
+	webhookConfig SubagentWebhookConfig
+	sendWebhook   func(ctx context.Context, req webhookpkg.SendRequest) error
 }
 
 func NewSubagentManager(
@@ -92,6 +126,16 @@ func NewSubagentManager(
 		maxIterations: maxIterations,
 		nextID:        1,
 		workQueue:     workQueue,
+		webhookConfig: defaultSubagentWebhookConfig(),
+		sendWebhook:   webhookpkg.Send,
+	}
+}
+
+func defaultSubagentWebhookConfig() SubagentWebhookConfig {
+	return SubagentWebhookConfig{
+		DefaultTimeoutMS:  5000,
+		DefaultMaxRetries: 3,
+		MaxPayloadBytes:   65536,
 	}
 }
 
@@ -120,6 +164,22 @@ func (sm *SubagentManager) SetAgentLookup(lookup AgentLookup) {
 	sm.agentLookup = lookup
 }
 
+func (sm *SubagentManager) SetWebhookConfig(cfg SubagentWebhookConfig) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	defaults := defaultSubagentWebhookConfig()
+	if cfg.DefaultTimeoutMS <= 0 {
+		cfg.DefaultTimeoutMS = defaults.DefaultTimeoutMS
+	}
+	if cfg.DefaultMaxRetries <= 0 {
+		cfg.DefaultMaxRetries = defaults.DefaultMaxRetries
+	}
+	if cfg.MaxPayloadBytes <= 0 {
+		cfg.MaxPayloadBytes = defaults.MaxPayloadBytes
+	}
+	sm.webhookConfig = cfg
+}
+
 // RegisterTool registers a tool for subagent execution.
 func (sm *SubagentManager) RegisterTool(tool Tool) {
 	sm.mu.Lock()
@@ -132,20 +192,52 @@ func (sm *SubagentManager) Spawn(
 	task, label, agentID, modelName, originChannel, originChatID string,
 	callback AsyncCallback,
 ) (string, error) {
+	_, message, err := sm.SpawnWithRequest(ctx, SpawnRequest{
+		Task:          task,
+		Label:         label,
+		AgentID:       agentID,
+		ModelName:     modelName,
+		Source:        "tool",
+		OriginChannel: originChannel,
+		OriginChatID:  originChatID,
+	}, callback)
+	return message, err
+}
+
+func (sm *SubagentManager) SpawnWithRequest(
+	ctx context.Context,
+	req SpawnRequest,
+	callback AsyncCallback,
+) (string, string, error) {
+	if strings.TrimSpace(req.Task) == "" {
+		return "", "", fmt.Errorf("task is required")
+	}
+	if strings.TrimSpace(req.ModelName) == "" {
+		return "", "", fmt.Errorf("model_name is required")
+	}
+
+	source := req.Source
+	if source == "" {
+		source = "tool"
+	}
+
 	sm.mu.Lock()
 	taskID := fmt.Sprintf("subagent-%d", sm.nextID)
 	sm.nextID++
 
 	subagentTask := &SubagentTask{
 		ID:            taskID,
-		Task:          task,
-		Label:         label,
-		AgentID:       agentID,
-		ModelName:     modelName,
-		OriginChannel: originChannel,
-		OriginChatID:  originChatID,
+		Task:          req.Task,
+		Label:         req.Label,
+		AgentID:       req.AgentID,
+		ModelName:     req.ModelName,
+		OriginChannel: req.OriginChannel,
+		OriginChatID:  req.OriginChatID,
 		Status:        "running",
 		Created:       time.Now().UnixMilli(),
+		Source:        source,
+		Metadata:      cloneStringMap(req.Metadata),
+		Webhook:       normalizeWebhook(req.Webhook),
 	}
 	sm.tasks[taskID] = subagentTask
 	workQueue := sm.workQueue
@@ -153,8 +245,8 @@ func (sm *SubagentManager) Spawn(
 
 	if workQueue != nil {
 		jobName := taskID
-		if label != "" {
-			jobName = fmt.Sprintf("%s (%s)", taskID, label)
+		if req.Label != "" {
+			jobName = fmt.Sprintf("%s (%s)", taskID, req.Label)
 		}
 		if err := workQueue.Submit(ctx, workqueue.Job{
 			Name: jobName,
@@ -163,20 +255,91 @@ func (sm *SubagentManager) Spawn(
 			},
 		}); err != nil {
 			sm.mu.Lock()
-			subagentTask.Status = "failed"
-			subagentTask.Result = fmt.Sprintf("failed to enqueue subagent: %v", err)
+			delete(sm.tasks, taskID)
 			sm.mu.Unlock()
-			return "", fmt.Errorf("failed to enqueue subagent: %w", err)
+			return "", "", fmt.Errorf("failed to enqueue subagent: %w", err)
 		}
 	} else {
-		// Start task in background with context cancellation support
 		go sm.runTask(ctx, subagentTask, callback)
 	}
 
-	if label != "" {
-		return fmt.Sprintf("Spawned subagent '%s' for task: %s", label, task), nil
+	if req.Label != "" {
+		return taskID, fmt.Sprintf("Spawned subagent '%s' for task: %s", req.Label, req.Task), nil
 	}
-	return fmt.Sprintf("Spawned subagent for task: %s", task), nil
+	return taskID, fmt.Sprintf("Spawned subagent for task: %s", req.Task), nil
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func cloneWebhook(src *SubagentWebhook) *SubagentWebhook {
+	if src == nil {
+		return nil
+	}
+	return &SubagentWebhook{
+		URL:        src.URL,
+		Headers:    cloneStringMap(src.Headers),
+		Events:     cloneBoolMap(src.Events),
+		TimeoutMS:  src.TimeoutMS,
+		MaxRetries: src.MaxRetries,
+	}
+}
+
+func cloneBoolMap(src map[string]bool) map[string]bool {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]bool, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func normalizeWebhook(spec *SubagentWebhook) *SubagentWebhook {
+	if spec == nil {
+		return nil
+	}
+	cloned := cloneWebhook(spec)
+	if len(cloned.Events) == 0 {
+		cloned.Events = map[string]bool{
+			"completed": true,
+			"failed":    true,
+			"canceled":  true,
+		}
+	}
+	return cloned
+}
+
+func snapshotTask(task *SubagentTask) *SubagentTask {
+	if task == nil {
+		return nil
+	}
+	return &SubagentTask{
+		ID:            task.ID,
+		Task:          task.Task,
+		Label:         task.Label,
+		AgentID:       task.AgentID,
+		ModelName:     task.ModelName,
+		OriginChannel: task.OriginChannel,
+		OriginChatID:  task.OriginChatID,
+		Status:        task.Status,
+		Result:        task.Result,
+		Error:         task.Error,
+		Created:       task.Created,
+		Finished:      task.Finished,
+		Source:        task.Source,
+		Metadata:      cloneStringMap(task.Metadata),
+		Webhook:       cloneWebhook(task.Webhook),
+	}
 }
 
 // resolveConfig 解析 subagent 的运行时配置
@@ -283,13 +446,11 @@ func getBuiltinSkillsDir() string {
 }
 
 func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, callback AsyncCallback) {
-	task.Status = "running"
-	task.Created = time.Now().UnixMilli()
-
-	// 解析配置
 	sm.mu.RLock()
 	cfg := sm.resolveConfig(task.AgentID, task.ModelName)
 	maxIter := sm.maxIterations
+	webhookCfg := sm.webhookConfig
+	sendWebhook := sm.sendWebhook
 	sm.mu.RUnlock()
 
 	// 构建 system prompt（从 workspace 加载）
@@ -312,17 +473,6 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 		},
 	}
 
-	// Check if context is already canceled before starting
-	select {
-	case <-ctx.Done():
-		sm.mu.Lock()
-		task.Status = "canceled"
-		task.Result = "Task canceled before execution"
-		sm.mu.Unlock()
-		return
-	default:
-	}
-
 	// 构建 LLM 选项
 	var llmOptions map[string]any
 	if cfg.maxTokens > 0 || cfg.temperature > 0 {
@@ -335,64 +485,159 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 		}
 	}
 
-	// 运行工具循环，使用解析后的模型和配置
-	loopResult, err := RunToolLoop(ctx, ToolLoopConfig{
-		Provider:      sm.provider,
-		Model:         cfg.model,
-		Tools:         cfg.tools,
-		MaxIterations: maxIter,
-		LLMOptions:    llmOptions,
-	}, messages, task.OriginChannel, task.OriginChatID)
+	finalStatus := "completed"
+	finalResult := ""
+	finalError := ""
+	var callbackResult *ToolResult
 
-	sm.mu.Lock()
-	var result *ToolResult
-	defer func() {
-		sm.mu.Unlock()
-		// Call callback if provided and result is set
-		if callback != nil && result != nil {
-			callback(ctx, result)
-		}
-	}()
-
-	if err != nil {
-		task.Status = "failed"
-		task.Result = fmt.Sprintf("Error: %v", err)
-		// Check if it was canceled
-		if ctx.Err() != nil {
-			task.Status = "canceled"
-			task.Result = "Task canceled during execution"
-		}
-		result = &ToolResult{
-			ForLLM:  task.Result,
+	select {
+	case <-ctx.Done():
+		finalStatus = "canceled"
+		finalError = "Task canceled before execution"
+		callbackResult = &ToolResult{
+			ForLLM:  finalError,
 			ForUser: "",
 			Silent:  false,
 			IsError: true,
 			Async:   false,
-			Err:     err,
+			Err:     ctx.Err(),
 		}
-	} else {
-		task.Status = "completed"
-		task.Result = loopResult.Content
-		result = &ToolResult{
-			ForLLM: fmt.Sprintf(
-				"Subagent '%s' completed (iterations: %d): %s",
-				task.Label,
-				loopResult.Iterations,
-				loopResult.Content,
-			),
-			ForUser: loopResult.Content,
-			Silent:  false,
-			IsError: false,
-			Async:   false,
+	default:
+		loopResult, err := RunToolLoop(ctx, ToolLoopConfig{
+			Provider:      sm.provider,
+			Model:         cfg.model,
+			Tools:         cfg.tools,
+			MaxIterations: maxIter,
+			LLMOptions:    llmOptions,
+		}, messages, task.OriginChannel, task.OriginChatID)
+		if err != nil {
+			finalStatus = "failed"
+			finalError = fmt.Sprintf("Error: %v", err)
+			callbackErr := err
+			if ctx.Err() != nil {
+				finalStatus = "canceled"
+				finalError = "Task canceled during execution"
+				callbackErr = ctx.Err()
+			}
+			callbackResult = &ToolResult{
+				ForLLM:  finalError,
+				ForUser: "",
+				Silent:  false,
+				IsError: true,
+				Async:   false,
+				Err:     callbackErr,
+			}
+		} else {
+			finalResult = loopResult.Content
+			callbackResult = &ToolResult{
+				ForLLM: fmt.Sprintf(
+					"Subagent '%s' completed (iterations: %d): %s",
+					task.Label,
+					loopResult.Iterations,
+					loopResult.Content,
+				),
+				ForUser: loopResult.Content,
+				Silent:  false,
+				IsError: false,
+				Async:   false,
+			}
 		}
 	}
+
+	sm.mu.Lock()
+	task.Status = finalStatus
+	task.Result = finalResult
+	task.Error = finalError
+	task.Finished = time.Now().UnixMilli()
+	taskSnapshot := snapshotTask(task)
+	sm.mu.Unlock()
+
+	if callback != nil && callbackResult != nil {
+		callback(ctx, callbackResult)
+	}
+
+	if taskSnapshot.Webhook != nil && sendWebhook != nil && shouldSendWebhookEvent(taskSnapshot.Webhook, taskSnapshot.Status) {
+		payload := webhookpkg.Payload{
+			Event:        taskSnapshot.Status,
+			Status:       taskSnapshot.Status,
+			TaskID:       taskSnapshot.ID,
+			Label:        taskSnapshot.Label,
+			AgentID:      taskSnapshot.AgentID,
+			ModelName:    taskSnapshot.ModelName,
+			Source:       taskSnapshot.Source,
+			Metadata:     cloneStringMap(taskSnapshot.Metadata),
+			Result:       taskSnapshot.Result,
+			Error:        taskSnapshot.Error,
+			CreatedAtMS:  taskSnapshot.Created,
+			FinishedAtMS: taskSnapshot.Finished,
+			DurationMS:   taskDurationMS(taskSnapshot),
+		}
+		err := sendWebhook(ctx, webhookpkg.SendRequest{
+			URL:             taskSnapshot.Webhook.URL,
+			Headers:         cloneStringMap(taskSnapshot.Webhook.Headers),
+			Event:           taskSnapshot.Status,
+			TaskID:          taskSnapshot.ID,
+			Payload:         payload,
+			Timeout:         time.Duration(resolveWebhookTimeout(taskSnapshot.Webhook, webhookCfg)) * time.Millisecond,
+			MaxRetries:      resolveWebhookMaxRetries(taskSnapshot.Webhook, webhookCfg),
+			MaxPayloadBytes: webhookCfg.MaxPayloadBytes,
+		})
+		if err != nil {
+			logger.WarnCF("subagent", "Failed to send subagent webhook", map[string]any{
+				"task_id": taskSnapshot.ID,
+				"status":  taskSnapshot.Status,
+				"url":     taskSnapshot.Webhook.URL,
+				"error":   err.Error(),
+			})
+		}
+	}
+}
+
+func shouldSendWebhookEvent(spec *SubagentWebhook, event string) bool {
+	if spec == nil || event == "" {
+		return false
+	}
+	if len(spec.Events) == 0 {
+		return event == "completed" || event == "failed" || event == "canceled"
+	}
+	return spec.Events[event]
+}
+
+func resolveWebhookTimeout(spec *SubagentWebhook, cfg SubagentWebhookConfig) int {
+	if spec != nil && spec.TimeoutMS > 0 {
+		return spec.TimeoutMS
+	}
+	if cfg.DefaultTimeoutMS > 0 {
+		return cfg.DefaultTimeoutMS
+	}
+	return defaultSubagentWebhookConfig().DefaultTimeoutMS
+}
+
+func resolveWebhookMaxRetries(spec *SubagentWebhook, cfg SubagentWebhookConfig) int {
+	if spec != nil && spec.MaxRetries > 0 {
+		return spec.MaxRetries
+	}
+	if cfg.DefaultMaxRetries > 0 {
+		return cfg.DefaultMaxRetries
+	}
+	return defaultSubagentWebhookConfig().DefaultMaxRetries
+}
+
+func taskDurationMS(task *SubagentTask) int64 {
+	if task == nil || task.Created <= 0 || task.Finished <= 0 || task.Finished < task.Created {
+		return 0
+	}
+	return task.Finished - task.Created
 }
 
 func (sm *SubagentManager) GetTask(taskID string) (*SubagentTask, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	task, ok := sm.tasks[taskID]
-	return task, ok
+	if !ok {
+		return nil, false
+	}
+	return snapshotTask(task), true
 }
 
 func (sm *SubagentManager) ListTasks() []*SubagentTask {
@@ -401,7 +646,7 @@ func (sm *SubagentManager) ListTasks() []*SubagentTask {
 
 	tasks := make([]*SubagentTask, 0, len(sm.tasks))
 	for _, task := range sm.tasks {
-		tasks = append(tasks, task)
+		tasks = append(tasks, snapshotTask(task))
 	}
 	return tasks
 }

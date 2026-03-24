@@ -37,20 +37,21 @@ import (
 )
 
 type AgentLoop struct {
-	bus            *bus.MessageBus
-	cfg            *config.Config
-	registry       *AgentRegistry
-	state          *state.Manager
-	running        atomic.Bool
-	summarizing    sync.Map
-	fallback       *providers.FallbackChain
-	channelManager *channels.Manager
-	mediaStore     media.MediaStore
-	transcriber    voice.Transcriber
-	cmdRegistry    *commands.Registry
-	mcp            mcpRuntime
-	mu             sync.RWMutex
-	workQueue      *workqueue.Queue
+	bus              *bus.MessageBus
+	cfg              *config.Config
+	registry         *AgentRegistry
+	state            *state.Manager
+	running          atomic.Bool
+	summarizing      sync.Map
+	fallback         *providers.FallbackChain
+	channelManager   *channels.Manager
+	mediaStore       media.MediaStore
+	transcriber      voice.Transcriber
+	cmdRegistry      *commands.Registry
+	mcp              mcpRuntime
+	mu               sync.RWMutex
+	workQueue        *workqueue.Queue
+	subagentManagers map[string]*tools.SubagentManager
 	// Track active requests for safe provider cleanup
 	activeRequests sync.WaitGroup
 }
@@ -97,9 +98,6 @@ func NewAgentLoop(
 ) *AgentLoop {
 	registry := NewAgentRegistry(cfg, provider)
 
-	// Register shared tools to all agents
-	registerSharedTools(cfg, msgBus, registry, provider, workQueue)
-
 	// Set up shared fallback chain
 	cooldown := providers.NewCooldownTracker()
 	fallbackChain := providers.NewFallbackChain(cooldown)
@@ -112,15 +110,19 @@ func NewAgentLoop(
 	}
 
 	al := &AgentLoop{
-		bus:         msgBus,
-		cfg:         cfg,
-		registry:    registry,
-		state:       stateManager,
-		summarizing: sync.Map{},
-		fallback:    fallbackChain,
-		cmdRegistry: commands.NewRegistry(commands.BuiltinDefinitions()),
-		workQueue:   workQueue,
+		bus:              msgBus,
+		cfg:              cfg,
+		registry:         registry,
+		state:            stateManager,
+		summarizing:      sync.Map{},
+		fallback:         fallbackChain,
+		cmdRegistry:      commands.NewRegistry(commands.BuiltinDefinitions()),
+		workQueue:        workQueue,
+		subagentManagers: make(map[string]*tools.SubagentManager),
 	}
+
+	// Register shared tools to all agents
+	registerSharedTools(cfg, msgBus, registry, provider, workQueue, al.registerSubagentManager)
 
 	return al
 }
@@ -132,6 +134,7 @@ func registerSharedTools(
 	registry *AgentRegistry,
 	provider providers.LLMProvider,
 	workQueue *workqueue.Queue,
+	registerSubagentManager func(agentID string, manager *tools.SubagentManager),
 ) {
 	for _, agentID := range registry.ListAgentIDs() {
 		agent, ok := registry.GetAgent(agentID)
@@ -238,15 +241,23 @@ func registerSharedTools(
 			}
 		}
 
-		// Spawn tool with allowlist checker
-		if cfg.Tools.IsToolEnabled("spawn") {
-			if cfg.Tools.IsToolEnabled("subagent") {
-				subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace, agent.Tools, cfg.Agents.Defaults.SubagentMaxIterations, workQueue)
-				subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
+		// Spawn / spawn API share the same SubagentManager kernel
+		if cfg.Tools.IsToolEnabled("subagent") && (cfg.Tools.IsToolEnabled("spawn") || cfg.Gateway.SpawnAPI.Enabled) {
+			subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace, agent.Tools, cfg.Agents.Defaults.SubagentMaxIterations, workQueue)
+			subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
+			subagentManager.SetWebhookConfig(tools.SubagentWebhookConfig{
+				DefaultTimeoutMS:  cfg.Gateway.OutboundWebhook.DefaultTimeoutMS,
+				DefaultMaxRetries: cfg.Gateway.OutboundWebhook.DefaultMaxRetries,
+				MaxPayloadBytes:   cfg.Gateway.OutboundWebhook.MaxPayloadBytes,
+			})
 
-				// 注入 AgentLookup 接口，使 subagent 可以查询目标 agent 的配置
-				subagentManager.SetAgentLookup(&agentLookupAdapter{registry: registry})
+			// 注入 AgentLookup 接口，使 subagent 可以查询目标 agent 的配置
+			subagentManager.SetAgentLookup(&agentLookupAdapter{registry: registry})
+			if registerSubagentManager != nil {
+				registerSubagentManager(agentID, subagentManager)
+			}
 
+			if cfg.Tools.IsToolEnabled("spawn") {
 				spawnTool := tools.NewSpawnTool(subagentManager)
 				currentAgentID := agentID
 				spawnTool.SetAllowlistChecker(func(targetAgentID string) bool {
@@ -257,9 +268,9 @@ func registerSharedTools(
 				// Also register SubagentTool for synchronous execution
 				subagentTool := tools.NewSubagentTool(subagentManager)
 				agent.Tools.Register(subagentTool)
-			} else {
-				logger.WarnCF("agent", "spawn tool requires subagent to be enabled", nil)
 			}
+		} else if cfg.Tools.IsToolEnabled("spawn") && !cfg.Tools.IsToolEnabled("subagent") {
+			logger.WarnCF("agent", "spawn tool requires subagent to be enabled", nil)
 		}
 	}
 }
@@ -393,6 +404,50 @@ func (al *AgentLoop) SetChannelManager(cm *channels.Manager) {
 	al.channelManager = cm
 }
 
+func (al *AgentLoop) registerSubagentManager(agentID string, manager *tools.SubagentManager) {
+	al.mu.Lock()
+	defer al.mu.Unlock()
+	if al.subagentManagers == nil {
+		al.subagentManagers = make(map[string]*tools.SubagentManager)
+	}
+	al.subagentManagers[agentID] = manager
+}
+
+func (al *AgentLoop) GetSubagentManager(agentID string) (*tools.SubagentManager, bool) {
+	al.mu.RLock()
+	defer al.mu.RUnlock()
+	manager, ok := al.subagentManagers[agentID]
+	return manager, ok
+}
+
+func (al *AgentLoop) GetDefaultSubagentManager() (*tools.SubagentManager, string, bool) {
+	defaultAgent := al.GetRegistry().GetDefaultAgent()
+	if defaultAgent == nil {
+		return nil, "", false
+	}
+	manager, ok := al.GetSubagentManager(defaultAgent.ID)
+	if !ok {
+		return nil, "", false
+	}
+	return manager, defaultAgent.ID, true
+}
+
+func (al *AgentLoop) FindSubagentTask(taskID string) (*tools.SubagentTask, bool) {
+	al.mu.RLock()
+	managers := make([]*tools.SubagentManager, 0, len(al.subagentManagers))
+	for _, manager := range al.subagentManagers {
+		managers = append(managers, manager)
+	}
+	al.mu.RUnlock()
+
+	for _, manager := range managers {
+		if task, ok := manager.GetTask(taskID); ok {
+			return task, true
+		}
+	}
+	return nil, false
+}
+
 // ReloadProviderAndConfig atomically swaps the provider and config with proper synchronization.
 // It uses a context to allow timeout control from the caller.
 // Returns an error if the reload fails or context is canceled.
@@ -448,7 +503,10 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	}
 
 	// Ensure shared tools are re-registered on the new registry
-	registerSharedTools(cfg, al.bus, registry, provider, workQueue)
+	newSubagentManagers := make(map[string]*tools.SubagentManager)
+	registerSharedTools(cfg, al.bus, registry, provider, workQueue, func(agentID string, manager *tools.SubagentManager) {
+		newSubagentManagers[agentID] = manager
+	})
 
 	// Atomically swap the config and registry under write lock
 	// This ensures readers see a consistent pair
@@ -458,6 +516,7 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	// Store new values
 	al.cfg = cfg
 	al.registry = registry
+	al.subagentManagers = newSubagentManagers
 
 	// Also update fallback chain with new config
 	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker())

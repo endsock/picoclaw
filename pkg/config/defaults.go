@@ -397,6 +397,14 @@ func DefaultConfig() *Config {
 		Gateway: GatewayConfig{
 			Host: "127.0.0.1",
 			Port: 18790,
+			SpawnAPI: SpawnAPIConfig{
+				Enabled: false,
+			},
+			OutboundWebhook: OutboundWebhookConfig{
+				DefaultTimeoutMS:  5000,
+				DefaultMaxRetries: 3,
+				MaxPayloadBytes:   65536,
+			},
 		},
 		WorkerQueue: WorkerQueueConfig{
 			Enabled:   true,

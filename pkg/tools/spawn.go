@@ -23,6 +23,10 @@ func NewSpawnTool(manager *SubagentManager) *SpawnTool {
 	}
 }
 
+func (t *SpawnTool) Manager() (*SubagentManager, bool) {
+	return t.manager, t.manager != nil
+}
+
 func (t *SpawnTool) Name() string {
 	return "spawn"
 }

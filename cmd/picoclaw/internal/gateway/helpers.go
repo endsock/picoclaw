@@ -252,6 +252,7 @@ func setupAndStartServices(
 	services.HealthServer = health.NewServer(cfg.Gateway.Host, cfg.Gateway.Port)
 	services.ChannelManager.SetupHTTPServer(addr, services.HealthServer)
 	registerWorkerQueueDebugRoute(services)
+	registerSpawnAPIRoutes(services, agentLoop)
 
 	if err := services.ChannelManager.StartAll(context.Background()); err != nil {
 		services.stopWorkQueue()
@@ -502,6 +503,7 @@ func restartServices(
 	services.HealthServer = health.NewServer(cfg.Gateway.Host, cfg.Gateway.Port)
 	services.ChannelManager.SetupHTTPServer(addr, services.HealthServer)
 	registerWorkerQueueDebugRoute(services)
+	registerSpawnAPIRoutes(services, al)
 
 	if err := services.ChannelManager.StartAll(ctx); err != nil {
 		return fmt.Errorf("error restarting channels: %w", err)

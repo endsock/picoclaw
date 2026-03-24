@@ -1495,7 +1495,7 @@ func (al *AgentLoop) runLLMIteration(
 				"agent_id":  agent.ID,
 				"iteration": iteration,
 			})
-			return "", iteration, true, nil
+			return response.Content, iteration, true, nil
 		}
 	}
 

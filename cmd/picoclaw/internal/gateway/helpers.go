@@ -39,6 +39,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/state"
+	"github.com/sipeed/picoclaw/pkg/taskdb"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/voice"
 	"github.com/sipeed/picoclaw/pkg/workqueue"
@@ -61,6 +62,7 @@ type gatewayServices struct {
 	DeviceService    *devices.Service
 	HealthServer     *health.Server
 	WorkQueue        *workqueue.Queue
+	TaskRecorder     tools.SubagentTaskRecorder
 	workQueueCancel  context.CancelFunc
 }
 
@@ -112,7 +114,7 @@ func gatewayCmd(debug bool) error {
 	if err != nil {
 		return err
 	}
-	if err := reloadAgentLoopWithWorkQueue(agentLoop, provider, cfg, services.WorkQueue); err != nil {
+	if err := reloadAgentLoopWithWorkQueue(agentLoop, provider, cfg, services.WorkQueue, services.TaskRecorder); err != nil {
 		stopAndCleanupServices(services, serviceShutdownTimeout)
 		return err
 	}
@@ -157,6 +159,7 @@ func setupAndStartServices(
 ) (*gatewayServices, error) {
 	services := &gatewayServices{}
 	services.setupWorkQueue(cfg)
+	services.setupTaskRecorder(cfg)
 
 	// Setup cron tool and service
 	execTimeout := time.Duration(cfg.Tools.Cron.ExecTimeoutMinutes) * time.Minute
@@ -304,6 +307,7 @@ func stopAndCleanupServices(
 			fms.Stop()
 		}
 	}
+	services.closeTaskRecorder()
 }
 
 // shutdownGateway performs a complete gateway shutdown
@@ -366,7 +370,9 @@ func handleConfigReload(
 	}
 
 	services.setupWorkQueue(newCfg)
+	services.setupTaskRecorder(newCfg)
 	al.SetWorkQueue(services.WorkQueue)
+	al.SetSubagentTaskRecorder(services.TaskRecorder)
 
 	// Use the atomic reload method on AgentLoop to safely swap provider and config.
 	// This handles locking internally to prevent races with in-flight LLM calls
@@ -415,7 +421,7 @@ func restartServices(
 
 	// Get current config from agent loop (which has been updated if this is a reload)
 	cfg := al.GetConfig()
-	if err := reloadAgentLoopWithWorkQueue(al, currentProvider(al), cfg, services.WorkQueue); err != nil {
+	if err := reloadAgentLoopWithWorkQueue(al, currentProvider(al), cfg, services.WorkQueue, services.TaskRecorder); err != nil {
 		return err
 	}
 
@@ -563,6 +569,35 @@ func (services *gatewayServices) stopWorkQueue() {
 	}
 }
 
+func (services *gatewayServices) setupTaskRecorder(cfg *config.Config) {
+	services.closeTaskRecorder()
+	if cfg == nil {
+		services.TaskRecorder = nil
+		return
+	}
+	recorder, err := taskdb.NewRecorder(cfg.TaskDB)
+	if err != nil {
+		logger.ErrorCF("taskdb", "Failed to initialize task recorder", map[string]any{
+			"error": err.Error(),
+		})
+		services.TaskRecorder = nil
+		return
+	}
+	services.TaskRecorder = recorder
+}
+
+func (services *gatewayServices) closeTaskRecorder() {
+	closer, ok := services.TaskRecorder.(interface{ Close() error })
+	if ok {
+		if err := closer.Close(); err != nil {
+			logger.WarnCF("taskdb", "Failed to close task recorder", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
+	services.TaskRecorder = nil
+}
+
 func registerWorkerQueueDebugRoute(services *gatewayServices) {
 	if services.ChannelManager == nil {
 		return
@@ -582,8 +617,10 @@ func reloadAgentLoopWithWorkQueue(
 	provider providers.LLMProvider,
 	cfg *config.Config,
 	queue *workqueue.Queue,
+	recorder tools.SubagentTaskRecorder,
 ) error {
 	al.SetWorkQueue(queue)
+	al.SetSubagentTaskRecorder(recorder)
 	reloadCtx, reloadCancel := context.WithTimeout(context.Background(), providerReloadTimeout)
 	defer reloadCancel()
 	return al.ReloadProviderAndConfig(reloadCtx, provider, cfg)

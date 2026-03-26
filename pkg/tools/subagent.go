@@ -2,7 +2,10 @@ package tools
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +86,39 @@ type SubagentWebhookConfig struct {
 	MaxPayloadBytes   int
 }
 
+type SubagentTaskRecorder interface {
+	CreateSubmitted(ctx context.Context, task *SubagentTaskRecord) error
+	MarkRunning(ctx context.Context, taskID string, startedAtMS int64) error
+	FinishTask(ctx context.Context, taskID string, patch *SubagentTaskFinishPatch) error
+}
+
+type SubagentTaskRecord struct {
+	TaskID        string
+	Source        string
+	AgentID       string
+	ModelName     string
+	Label         string
+	Task          string
+	OriginChannel string
+	OriginChatID  string
+	MetadataJSON  []byte
+	WebhookJSON   []byte
+	Status        string
+	SubmittedAtMS int64
+}
+
+type SubagentTaskFinishPatch struct {
+	Status          string
+	Result          string
+	Error           string
+	CallbackForLLM  string
+	CallbackForUser string
+	Iterations      int
+	StartedAtMS     *int64
+	FinishedAtMS    int64
+	DurationMS      int64
+}
+
 type SubagentManager struct {
 	tasks          map[string]*SubagentTask
 	mu             sync.RWMutex
@@ -95,13 +131,13 @@ type SubagentManager struct {
 	temperature    float64
 	hasMaxTokens   bool
 	hasTemperature bool
-	nextID         int
 	workQueue      *workqueue.Queue
 
 	// 新增字段
 	agentLookup   AgentLookup
 	webhookConfig SubagentWebhookConfig
 	sendWebhook   func(ctx context.Context, req webhookpkg.SendRequest) error
+	taskRecorder  SubagentTaskRecorder
 }
 
 func NewSubagentManager(
@@ -124,7 +160,6 @@ func NewSubagentManager(
 		workspace:     workspace,
 		tools:         parentTools,
 		maxIterations: maxIterations,
-		nextID:        1,
 		workQueue:     workQueue,
 		webhookConfig: defaultSubagentWebhookConfig(),
 		sendWebhook:   webhookpkg.Send,
@@ -180,6 +215,12 @@ func (sm *SubagentManager) SetWebhookConfig(cfg SubagentWebhookConfig) {
 	sm.webhookConfig = cfg
 }
 
+func (sm *SubagentManager) SetTaskRecorder(recorder SubagentTaskRecorder) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.taskRecorder = recorder
+}
+
 // RegisterTool registers a tool for subagent execution.
 func (sm *SubagentManager) RegisterTool(tool Tool) {
 	sm.mu.Lock()
@@ -220,10 +261,14 @@ func (sm *SubagentManager) SpawnWithRequest(
 	if source == "" {
 		source = "tool"
 	}
+	submittedAt := time.Now().UnixMilli()
 
 	sm.mu.Lock()
-	taskID := fmt.Sprintf("subagent-%d", sm.nextID)
-	sm.nextID++
+	taskID, err := newSubagentTaskID()
+	if err != nil {
+		sm.mu.Unlock()
+		return "", "", fmt.Errorf("generate task id: %w", err)
+	}
 
 	subagentTask := &SubagentTask{
 		ID:            taskID,
@@ -234,14 +279,25 @@ func (sm *SubagentManager) SpawnWithRequest(
 		OriginChannel: req.OriginChannel,
 		OriginChatID:  req.OriginChatID,
 		Status:        "running",
-		Created:       time.Now().UnixMilli(),
+		Created:       submittedAt,
 		Source:        source,
 		Metadata:      cloneStringMap(req.Metadata),
 		Webhook:       normalizeWebhook(req.Webhook),
 	}
 	sm.tasks[taskID] = subagentTask
 	workQueue := sm.workQueue
+	recorder := sm.taskRecorder
 	sm.mu.Unlock()
+
+	record := buildTaskRecord(subagentTask)
+	if recorder != nil {
+		if err := recorder.CreateSubmitted(ctx, record); err != nil {
+			logger.WarnCF("subagent", "Failed to record submitted subagent task", map[string]any{
+				"task_id": taskID,
+				"error":   err.Error(),
+			})
+		}
+	}
 
 	if workQueue != nil {
 		jobName := taskID
@@ -254,6 +310,20 @@ func (sm *SubagentManager) SpawnWithRequest(
 				sm.runTask(runCtx, subagentTask, callback)
 			},
 		}); err != nil {
+			finishedAt := time.Now().UnixMilli()
+			if recorder != nil {
+				if recErr := recorder.FinishTask(ctx, taskID, &SubagentTaskFinishPatch{
+					Status:       "submit_failed",
+					Error:        fmt.Sprintf("failed to enqueue subagent: %v", err),
+					FinishedAtMS: finishedAt,
+					DurationMS:   finishedAt - submittedAt,
+				}); recErr != nil {
+					logger.WarnCF("subagent", "Failed to record submit_failed subagent task", map[string]any{
+						"task_id": taskID,
+						"error":   recErr.Error(),
+					})
+				}
+			}
 			sm.mu.Lock()
 			delete(sm.tasks, taskID)
 			sm.mu.Unlock()
@@ -263,10 +333,34 @@ func (sm *SubagentManager) SpawnWithRequest(
 		go sm.runTask(ctx, subagentTask, callback)
 	}
 
+	logger.InfoCF("subagent", "Subagent status changed", map[string]any{
+		"task_id":  taskID,
+		"label":    req.Label,
+		"agent_id": req.AgentID,
+		"model":    req.ModelName,
+		"source":   source,
+		"status":   "submit",
+	})
+
 	if req.Label != "" {
 		return taskID, fmt.Sprintf("Spawned subagent '%s' for task: %s", req.Label, req.Task), nil
 	}
 	return taskID, fmt.Sprintf("Spawned subagent for task: %s", req.Task), nil
+}
+
+func newSubagentTaskID() (string, error) {
+	const digits = "0123456789"
+	const length = 8
+
+	buf := make([]byte, length)
+	for i := range buf {
+		n, err := crand.Int(crand.Reader, big.NewInt(int64(len(digits))))
+		if err != nil {
+			return "", err
+		}
+		buf[i] = digits[n.Int64()]
+	}
+	return "subagent-" + string(buf), nil
 }
 
 func cloneStringMap(src map[string]string) map[string]string {
@@ -340,6 +434,54 @@ func snapshotTask(task *SubagentTask) *SubagentTask {
 		Metadata:      cloneStringMap(task.Metadata),
 		Webhook:       cloneWebhook(task.Webhook),
 	}
+}
+
+func buildTaskRecord(task *SubagentTask) *SubagentTaskRecord {
+	if task == nil {
+		return nil
+	}
+	metadataJSON, err := marshalOptionalJSON(task.Metadata)
+	if err != nil {
+		logger.WarnCF("subagent", "Failed to marshal subagent metadata", map[string]any{
+			"task_id": task.ID,
+			"error":   err.Error(),
+		})
+	}
+	webhookJSON, err := marshalOptionalJSON(task.Webhook)
+	if err != nil {
+		logger.WarnCF("subagent", "Failed to marshal subagent webhook", map[string]any{
+			"task_id": task.ID,
+			"error":   err.Error(),
+		})
+	}
+	return &SubagentTaskRecord{
+		TaskID:        task.ID,
+		Source:        task.Source,
+		AgentID:       task.AgentID,
+		ModelName:     task.ModelName,
+		Label:         task.Label,
+		Task:          task.Task,
+		OriginChannel: task.OriginChannel,
+		OriginChatID:  task.OriginChatID,
+		MetadataJSON:  metadataJSON,
+		WebhookJSON:   webhookJSON,
+		Status:        "submitted",
+		SubmittedAtMS: task.Created,
+	}
+}
+
+func marshalOptionalJSON(v any) ([]byte, error) {
+	if v == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	if string(data) == "null" || string(data) == "{}" {
+		return nil, nil
+	}
+	return data, nil
 }
 
 // resolveConfig 解析 subagent 的运行时配置
@@ -451,7 +593,27 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 	maxIter := sm.maxIterations
 	webhookCfg := sm.webhookConfig
 	sendWebhook := sm.sendWebhook
+	recorder := sm.taskRecorder
 	sm.mu.RUnlock()
+
+	startedAt := time.Now().UnixMilli()
+	if recorder != nil {
+		if err := recorder.MarkRunning(ctx, task.ID, startedAt); err != nil {
+			logger.WarnCF("subagent", "Failed to mark subagent task running", map[string]any{
+				"task_id": task.ID,
+				"error":   err.Error(),
+			})
+		}
+	}
+
+	logger.InfoCF("subagent", "Subagent status changed", map[string]any{
+		"task_id":  task.ID,
+		"label":    task.Label,
+		"agent_id": task.AgentID,
+		"model":    task.ModelName,
+		"source":   task.Source,
+		"status":   "running",
+	})
 
 	// 构建 system prompt（从 workspace 加载）
 	systemPrompt := sm.buildSubagentSystemPrompt(cfg.workspace)
@@ -488,6 +650,7 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 	finalStatus := "completed"
 	finalResult := ""
 	finalError := ""
+	iterations := 0
 	var callbackResult *ToolResult
 
 	select {
@@ -529,6 +692,7 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 			}
 		} else {
 			finalResult = loopResult.Content
+			iterations = loopResult.Iterations
 			callbackResult = &ToolResult{
 				ForLLM: fmt.Sprintf(
 					"Subagent '%s' completed (iterations: %d): %s",
@@ -544,17 +708,53 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 		}
 	}
 
+	finishedAt := time.Now().UnixMilli()
+	durationMS := finishedAt - task.Created
 	sm.mu.Lock()
 	task.Status = finalStatus
 	task.Result = finalResult
 	task.Error = finalError
-	task.Finished = time.Now().UnixMilli()
+	task.Finished = finishedAt
 	taskSnapshot := snapshotTask(task)
 	sm.mu.Unlock()
+
+	if recorder != nil {
+		patch := &SubagentTaskFinishPatch{
+			Status:       finalStatus,
+			Result:       finalResult,
+			Error:        finalError,
+			Iterations:   iterations,
+			StartedAtMS:  &startedAt,
+			FinishedAtMS: finishedAt,
+			DurationMS:   durationMS,
+		}
+		if callbackResult != nil {
+			patch.CallbackForLLM = callbackResult.ForLLM
+			patch.CallbackForUser = callbackResult.ForUser
+		}
+		if err := recorder.FinishTask(ctx, task.ID, patch); err != nil {
+			logger.WarnCF("subagent", "Failed to finish subagent task record", map[string]any{
+				"task_id": task.ID,
+				"error":   err.Error(),
+			})
+		}
+	}
 
 	if callback != nil && callbackResult != nil {
 		callback(ctx, callbackResult)
 	}
+
+	logger.InfoCF("subagent", "Subagent status changed", map[string]any{
+		"task_id":     taskSnapshot.ID,
+		"label":       taskSnapshot.Label,
+		"agent_id":    taskSnapshot.AgentID,
+		"model":       taskSnapshot.ModelName,
+		"source":      taskSnapshot.Source,
+		"status":      "finished",
+		"task_status": taskSnapshot.Status,
+		"result_len":  len(taskSnapshot.Result),
+		"error":       taskSnapshot.Error,
+	})
 
 	if taskSnapshot.Webhook != nil && sendWebhook != nil && shouldSendWebhookEvent(taskSnapshot.Webhook, taskSnapshot.Status) {
 		payload := webhookpkg.Payload{
@@ -570,7 +770,7 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 			Error:        taskSnapshot.Error,
 			CreatedAtMS:  taskSnapshot.Created,
 			FinishedAtMS: taskSnapshot.Finished,
-			DurationMS:   taskDurationMS(taskSnapshot),
+			DurationMS:   durationMS,
 		}
 		err := sendWebhook(ctx, webhookpkg.SendRequest{
 			URL:             taskSnapshot.Webhook.URL,

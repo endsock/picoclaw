@@ -411,6 +411,13 @@ func DefaultConfig() *Config {
 			Workers:   4,
 			QueueSize: 128,
 		},
+		TaskDB: TaskDBConfig{
+			Enabled:                false,
+			AutoMigrate:            true,
+			MaxOpenConns:           10,
+			MaxIdleConns:           5,
+			ConnMaxLifetimeMinutes: 30,
+		},
 		Tools: ToolsConfig{
 			MediaCleanup: MediaCleanupConfig{
 				ToolConfig: ToolConfig{

@@ -51,6 +51,7 @@ type AgentLoop struct {
 	mcp              mcpRuntime
 	mu               sync.RWMutex
 	workQueue        *workqueue.Queue
+	taskRecorder     tools.SubagentTaskRecorder
 	subagentManagers map[string]*tools.SubagentManager
 	// Track active requests for safe provider cleanup
 	activeRequests sync.WaitGroup
@@ -122,7 +123,7 @@ func NewAgentLoop(
 	}
 
 	// Register shared tools to all agents
-	registerSharedTools(cfg, msgBus, registry, provider, workQueue, al.registerSubagentManager)
+	registerSharedTools(cfg, msgBus, registry, provider, workQueue, al.taskRecorder, al.registerSubagentManager)
 
 	return al
 }
@@ -134,6 +135,7 @@ func registerSharedTools(
 	registry *AgentRegistry,
 	provider providers.LLMProvider,
 	workQueue *workqueue.Queue,
+	taskRecorder tools.SubagentTaskRecorder,
 	registerSubagentManager func(agentID string, manager *tools.SubagentManager),
 ) {
 	for _, agentID := range registry.ListAgentIDs() {
@@ -253,6 +255,7 @@ func registerSharedTools(
 
 			// 注入 AgentLookup 接口，使 subagent 可以查询目标 agent 的配置
 			subagentManager.SetAgentLookup(&agentLookupAdapter{registry: registry})
+			subagentManager.SetTaskRecorder(taskRecorder)
 			if registerSubagentManager != nil {
 				registerSubagentManager(agentID, subagentManager)
 			}
@@ -504,7 +507,7 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 
 	// Ensure shared tools are re-registered on the new registry
 	newSubagentManagers := make(map[string]*tools.SubagentManager)
-	registerSharedTools(cfg, al.bus, registry, provider, workQueue, func(agentID string, manager *tools.SubagentManager) {
+	registerSharedTools(cfg, al.bus, registry, provider, workQueue, al.taskRecorder, func(agentID string, manager *tools.SubagentManager) {
 		newSubagentManagers[agentID] = manager
 	})
 
@@ -563,6 +566,20 @@ func (al *AgentLoop) GetConfig() *config.Config {
 	return al.cfg
 }
 
+func (al *AgentLoop) PublishOutbound(ctx context.Context, msg bus.OutboundMessage) error {
+	if al == nil || al.bus == nil {
+		return errors.New("message bus not configured")
+	}
+	return al.bus.PublishOutbound(ctx, msg)
+}
+
+func (al *AgentLoop) SubscribeOutbound(ctx context.Context) (bus.OutboundMessage, bool) {
+	if al == nil || al.bus == nil {
+		return bus.OutboundMessage{}, false
+	}
+	return al.bus.SubscribeOutbound(ctx)
+}
+
 // SetMediaStore injects a MediaStore for media lifecycle management.
 func (al *AgentLoop) SetMediaStore(s media.MediaStore) {
 	al.mediaStore = s
@@ -585,6 +602,15 @@ func (al *AgentLoop) SetWorkQueue(queue *workqueue.Queue) {
 	al.mu.Lock()
 	defer al.mu.Unlock()
 	al.workQueue = queue
+}
+
+func (al *AgentLoop) SetSubagentTaskRecorder(recorder tools.SubagentTaskRecorder) {
+	al.mu.Lock()
+	defer al.mu.Unlock()
+	al.taskRecorder = recorder
+	for _, manager := range al.subagentManagers {
+		manager.SetTaskRecorder(recorder)
+	}
 }
 
 var audioAnnotationRe = regexp.MustCompile(`\[(voice|audio)(?::[^\]]*)?\]`)

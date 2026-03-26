@@ -83,6 +83,7 @@ type Config struct {
 	ModelList   []ModelConfig     `json:"model_list"` // New model-centric provider configuration
 	Gateway     GatewayConfig     `json:"gateway"`
 	WorkerQueue WorkerQueueConfig `json:"worker_queue"`
+	TaskDB      TaskDBConfig      `json:"task_db"`
 	Tools       ToolsConfig       `json:"tools"`
 	Heartbeat   HeartbeatConfig   `json:"heartbeat"`
 	Devices     DevicesConfig     `json:"devices"`
@@ -645,6 +646,15 @@ type WorkerQueueConfig struct {
 	Enabled   bool `json:"enabled" env:"PICOCLAW_WORKER_QUEUE_ENABLED"`
 	Workers   int  `json:"workers" env:"PICOCLAW_WORKER_QUEUE_WORKERS"`
 	QueueSize int  `json:"queue_size" env:"PICOCLAW_WORKER_QUEUE_QUEUE_SIZE"`
+}
+
+type TaskDBConfig struct {
+	Enabled                bool   `json:"enabled" env:"PICOCLAW_TASK_DB_ENABLED"`
+	DSN                    string `json:"dsn" env:"PICOCLAW_TASK_DB_DSN"`
+	AutoMigrate            bool   `json:"auto_migrate" env:"PICOCLAW_TASK_DB_AUTO_MIGRATE"`
+	MaxOpenConns           int    `json:"max_open_conns" env:"PICOCLAW_TASK_DB_MAX_OPEN_CONNS"`
+	MaxIdleConns           int    `json:"max_idle_conns" env:"PICOCLAW_TASK_DB_MAX_IDLE_CONNS"`
+	ConnMaxLifetimeMinutes int    `json:"conn_max_lifetime_minutes" env:"PICOCLAW_TASK_DB_CONN_MAX_LIFETIME_MINUTES"`
 }
 
 type ToolDiscoveryConfig struct {

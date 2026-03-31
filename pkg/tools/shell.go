@@ -344,17 +344,38 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 					})
 				_ = cmd.Process.Kill()
 			}
-			err = <-done
-			logger.InfoCF("tool", "Exec command wait returned after kill fallback",
-				map[string]any{
-					"tool":       t.Name(),
-					"command":    command,
-					"cwd":        cwd,
-					"pid":        processPID(cmd),
-					"error":      errorString(err),
-					"stdout_len": stdout.Len(),
-					"stderr_len": stderr.Len(),
-				})
+			select {
+			case err = <-done:
+				logger.InfoCF("tool", "Exec command wait returned after kill fallback",
+					map[string]any{
+						"tool":       t.Name(),
+						"command":    command,
+						"cwd":        cwd,
+						"pid":        processPID(cmd),
+						"error":      errorString(err),
+						"stdout_len": stdout.Len(),
+						"stderr_len": stderr.Len(),
+					})
+			case <-time.After(10 * time.Second):
+				waitErr := fmt.Errorf("command did not exit within 10s after forced kill")
+				logger.ErrorCF("tool", "Exec command wait timed out after kill fallback",
+					map[string]any{
+						"tool":       t.Name(),
+						"command":    command,
+						"cwd":        cwd,
+						"pid":        processPID(cmd),
+						"stdout_len": stdout.Len(),
+						"stderr_len": stderr.Len(),
+						"error":      waitErr.Error(),
+					})
+				msg := "command did not exit within 10s after forced kill"
+				return &ToolResult{
+					ForLLM:  msg,
+					ForUser: msg,
+					IsError: true,
+					Err:     waitErr,
+				}
+			}
 		}
 	}
 

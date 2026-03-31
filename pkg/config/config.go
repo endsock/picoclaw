@@ -450,15 +450,27 @@ type WeComAppConfig struct {
 }
 
 type WeComAIBotConfig struct {
-	Enabled            bool                `json:"enabled"              env:"PICOCLAW_CHANNELS_WECOM_AIBOT_ENABLED"`
-	Token              string              `json:"token"                env:"PICOCLAW_CHANNELS_WECOM_AIBOT_TOKEN"`
-	EncodingAESKey     string              `json:"encoding_aes_key"     env:"PICOCLAW_CHANNELS_WECOM_AIBOT_ENCODING_AES_KEY"`
-	WebhookPath        string              `json:"webhook_path"         env:"PICOCLAW_CHANNELS_WECOM_AIBOT_WEBHOOK_PATH"`
-	AllowFrom          FlexibleStringSlice `json:"allow_from"           env:"PICOCLAW_CHANNELS_WECOM_AIBOT_ALLOW_FROM"`
-	ReplyTimeout       int                 `json:"reply_timeout"        env:"PICOCLAW_CHANNELS_WECOM_AIBOT_REPLY_TIMEOUT"`
-	MaxSteps           int                 `json:"max_steps"            env:"PICOCLAW_CHANNELS_WECOM_AIBOT_MAX_STEPS"`       // Maximum streaming steps
-	WelcomeMessage     string              `json:"welcome_message"      env:"PICOCLAW_CHANNELS_WECOM_AIBOT_WELCOME_MESSAGE"` // Sent on enter_chat event; empty = no welcome
-	ReasoningChannelID string              `json:"reasoning_channel_id" env:"PICOCLAW_CHANNELS_WECOM_AIBOT_REASONING_CHANNEL_ID"`
+	Enabled                bool                `json:"enabled"                   env:"PICOCLAW_CHANNELS_WECOM_AIBOT_ENABLED"`
+	Mode                   string              `json:"mode,omitempty"            env:"PICOCLAW_CHANNELS_WECOM_AIBOT_MODE"`
+	Token                  string              `json:"token"                     env:"PICOCLAW_CHANNELS_WECOM_AIBOT_TOKEN"`
+	EncodingAESKey         string              `json:"encoding_aes_key"          env:"PICOCLAW_CHANNELS_WECOM_AIBOT_ENCODING_AES_KEY"`
+	WebhookPath            string              `json:"webhook_path"              env:"PICOCLAW_CHANNELS_WECOM_AIBOT_WEBHOOK_PATH"`
+	BotID                  string              `json:"bot_id,omitempty"          env:"PICOCLAW_CHANNELS_WECOM_AIBOT_BOT_ID"`
+	Secret                 string              `json:"secret,omitempty"          env:"PICOCLAW_CHANNELS_WECOM_AIBOT_SECRET"`
+	WSURL                  string              `json:"ws_url,omitempty"          env:"PICOCLAW_CHANNELS_WECOM_AIBOT_WS_URL"`
+	Scene                  int                 `json:"scene,omitempty"           env:"PICOCLAW_CHANNELS_WECOM_AIBOT_SCENE"`
+	PlugVersion            string              `json:"plug_version,omitempty"    env:"PICOCLAW_CHANNELS_WECOM_AIBOT_PLUG_VERSION"`
+	HeartbeatInterval      int                 `json:"heartbeat_interval,omitempty"       env:"PICOCLAW_CHANNELS_WECOM_AIBOT_HEARTBEAT_INTERVAL"`
+	ReconnectInterval      int                 `json:"reconnect_interval,omitempty"       env:"PICOCLAW_CHANNELS_WECOM_AIBOT_RECONNECT_INTERVAL"`
+	MaxReconnectAttempts   int                 `json:"max_reconnect_attempts,omitempty"   env:"PICOCLAW_CHANNELS_WECOM_AIBOT_MAX_RECONNECT_ATTEMPTS"`
+	MaxAuthFailureAttempts int                 `json:"max_auth_failure_attempts,omitempty" env:"PICOCLAW_CHANNELS_WECOM_AIBOT_MAX_AUTH_FAILURE_ATTEMPTS"`
+	ReplyAckTimeout        int                 `json:"reply_ack_timeout,omitempty"        env:"PICOCLAW_CHANNELS_WECOM_AIBOT_REPLY_ACK_TIMEOUT"`
+	MaxReplyQueueSize      int                 `json:"max_reply_queue_size,omitempty"     env:"PICOCLAW_CHANNELS_WECOM_AIBOT_MAX_REPLY_QUEUE_SIZE"`
+	AllowFrom              FlexibleStringSlice `json:"allow_from"                env:"PICOCLAW_CHANNELS_WECOM_AIBOT_ALLOW_FROM"`
+	ReplyTimeout           int                 `json:"reply_timeout"             env:"PICOCLAW_CHANNELS_WECOM_AIBOT_REPLY_TIMEOUT"`
+	MaxSteps               int                 `json:"max_steps"                 env:"PICOCLAW_CHANNELS_WECOM_AIBOT_MAX_STEPS"`       // Maximum streaming steps
+	WelcomeMessage         string              `json:"welcome_message"           env:"PICOCLAW_CHANNELS_WECOM_AIBOT_WELCOME_MESSAGE"` // Sent on enter_chat event; empty = no welcome
+	ReasoningChannelID     string              `json:"reasoning_channel_id"      env:"PICOCLAW_CHANNELS_WECOM_AIBOT_REASONING_CHANNEL_ID"`
 }
 
 type PicoConfig struct {

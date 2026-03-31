@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -291,8 +292,15 @@ func (m *Manager) initChannels() error {
 		m.initChannel("wecom", "WeCom")
 	}
 
-	if m.config.Channels.WeComAIBot.Enabled && m.config.Channels.WeComAIBot.Token != "" {
-		m.initChannel("wecom_aibot", "WeCom AI Bot")
+	if m.config.Channels.WeComAIBot.Enabled {
+		cfg := m.config.Channels.WeComAIBot
+		if strings.EqualFold(cfg.Mode, "websocket") {
+			if cfg.BotID != "" && cfg.Secret != "" {
+				m.initChannel("wecom_aibot", "WeCom AI Bot")
+			}
+		} else if cfg.Token != "" {
+			m.initChannel("wecom_aibot", "WeCom AI Bot")
+		}
 	}
 
 	if m.config.Channels.WeComApp.Enabled && m.config.Channels.WeComApp.CorpID != "" {

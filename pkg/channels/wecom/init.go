@@ -1,6 +1,8 @@
 package wecom
 
 import (
+	"strings"
+
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -14,6 +16,9 @@ func init() {
 		return NewWeComAppChannel(cfg.Channels.WeComApp, b)
 	})
 	channels.RegisterFactory("wecom_aibot", func(cfg *config.Config, b *bus.MessageBus) (channels.Channel, error) {
+		if strings.EqualFold(cfg.Channels.WeComAIBot.Mode, "websocket") {
+			return NewWeComAIBotWebSocketChannel(cfg.Channels.WeComAIBot, b)
+		}
 		return NewWeComAIBotChannel(cfg.Channels.WeComAIBot, b)
 	})
 }

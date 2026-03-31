@@ -62,6 +62,7 @@ type processOptions struct {
 	SessionKey      string   // Session identifier for history/context
 	Channel         string   // Target channel for tool execution
 	ChatID          string   // Target chat ID for tool execution
+	SenderID        string   // Original sender ID for tool execution context
 	UserMessage     string   // User message content (may include prefix)
 	Media           []string // media:// refs from inbound message
 	DefaultResponse string   // Response when LLM returns empty
@@ -869,6 +870,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		SessionKey:      sessionKey,
 		Channel:         msg.Channel,
 		ChatID:          msg.ChatID,
+		SenderID:        msg.SenderID,
 		UserMessage:     msg.Content,
 		Media:           msg.Media,
 		DefaultResponse: defaultResponse,
@@ -1492,8 +1494,9 @@ func (al *AgentLoop) runLLMIteration(
 					})
 				}
 
+				toolCtx := tools.WithToolSenderID(ctx, opts.SenderID)
 				toolResult := agent.Tools.ExecuteWithContext(
-					ctx,
+					toolCtx,
 					tc.Name,
 					tc.Arguments,
 					opts.Channel,

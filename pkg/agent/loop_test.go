@@ -170,6 +170,7 @@ func TestToolRegistry_ToolRegistration(t *testing.T) {
 // TestToolContext_Updates verifies tool context helpers work correctly
 func TestToolContext_Updates(t *testing.T) {
 	ctx := tools.WithToolContext(context.Background(), "telegram", "chat-42")
+	ctx = tools.WithToolSenderID(ctx, "user-99")
 
 	if got := tools.ToolChannel(ctx); got != "telegram" {
 		t.Errorf("expected channel 'telegram', got %q", got)
@@ -177,10 +178,16 @@ func TestToolContext_Updates(t *testing.T) {
 	if got := tools.ToolChatID(ctx); got != "chat-42" {
 		t.Errorf("expected chatID 'chat-42', got %q", got)
 	}
+	if got := tools.ToolSenderID(ctx); got != "user-99" {
+		t.Errorf("expected senderID 'user-99', got %q", got)
+	}
 
 	// Empty context returns empty strings
 	if got := tools.ToolChannel(context.Background()); got != "" {
 		t.Errorf("expected empty channel from bare context, got %q", got)
+	}
+	if got := tools.ToolSenderID(context.Background()); got != "" {
+		t.Errorf("expected empty senderID from bare context, got %q", got)
 	}
 }
 

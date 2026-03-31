@@ -129,6 +129,7 @@ func TestSpawnWithRequestStoresAPIMetadata(t *testing.T) {
 			TimeoutMS:  2000,
 			MaxRetries: 2,
 		},
+		SenderID: "user-42",
 	}, nil)
 	if err != nil {
 		t.Fatalf("SpawnWithRequest failed: %v", err)
@@ -149,6 +150,9 @@ func TestSpawnWithRequestStoresAPIMetadata(t *testing.T) {
 	}
 	if task.Webhook == nil || task.Webhook.URL != "http://example.com/webhook" {
 		t.Fatalf("Webhook = %#v", task.Webhook)
+	}
+	if task.SenderID != "user-42" {
+		t.Fatalf("SenderID = %q, want user-42", task.SenderID)
 	}
 	if !task.Webhook.Events["completed"] || !task.Webhook.Events["failed"] || !task.Webhook.Events["canceled"] {
 		t.Fatalf("default webhook events not set: %#v", task.Webhook.Events)
@@ -211,6 +215,7 @@ func TestSpawnWithRequestRecordsSubmittedAndSubmitFailed(t *testing.T) {
 		Webhook: &SubagentWebhook{
 			URL: "http://example.com/webhook",
 		},
+		SenderID: "user-99",
 	}, nil)
 	if !errors.Is(err, workqueue.ErrQueueFull) {
 		t.Fatalf("err = %v, want %v", err, workqueue.ErrQueueFull)
@@ -228,6 +233,9 @@ func TestSpawnWithRequestRecordsSubmittedAndSubmitFailed(t *testing.T) {
 	}
 	if calls[0].task.Source != "api" || calls[0].task.ModelName != "claude-sonnet-4-6" {
 		t.Fatalf("submitted task fields = %+v", calls[0].task)
+	}
+	if calls[0].task.SenderID != "user-99" {
+		t.Fatalf("submitted sender_id = %q, want user-99", calls[0].task.SenderID)
 	}
 	if len(calls[0].task.MetadataJSON) == 0 || len(calls[0].task.WebhookJSON) == 0 {
 		t.Fatalf("submitted json fields missing: %+v", calls[0].task)

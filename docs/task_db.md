@@ -134,6 +134,7 @@ cron 只是把一条消息重新喂给主 agent；只有当主 agent 的 LLM 在
    - label
    - task 原文
    - origin_channel / origin_chat_id
+   - sender_id
    - metadata
    - webhook
    - 最终结果 `loopResult.Content`
@@ -173,6 +174,7 @@ cron 只是把一条消息重新喂给主 agent；只有当主 agent 的 LLM 在
 - metadata
 - webhook
 - origin channel/chat_id
+- sender_id
 - task_id
 
 `runTask` 已掌握：
@@ -229,6 +231,7 @@ type SubagentTaskRecord struct {
     Task             string
     OriginChannel    string
     OriginChatID     string
+    SenderID         string
     MetadataJSON     []byte
     WebhookJSON      []byte
     Status           string
@@ -274,6 +277,7 @@ CREATE TABLE `subagent_tasks` (
 
   `origin_channel` VARCHAR(64) DEFAULT NULL,
   `origin_chat_id` VARCHAR(191) DEFAULT NULL,
+  `sender_id` VARCHAR(500) DEFAULT NULL,
 
   `status` VARCHAR(32) NOT NULL COMMENT 'submitted/running/completed/failed/canceled/submit_failed',
   `result_text` LONGTEXT DEFAULT NULL COMMENT 'subagent 最终原始结果 loopResult.Content',
@@ -318,6 +322,7 @@ CREATE TABLE `subagent_tasks` (
 | `label` | 可选短标签 |
 | `task_text` | subagent 的任务原文 |
 | `origin_channel` / `origin_chat_id` | 来源会话，用于异步回传 |
+| `sender_id` | 触发这次 subagent 的原始发送者 ID |
 | `status` | DB 状态 |
 | `result_text` | subagent 的最终回答原文 |
 | `error_text` | 失败/取消错误 |
@@ -353,6 +358,7 @@ type SubagentTaskModel struct {
 
     OriginChannel    *string    `gorm:"size:64;index:idx_origin"`
     OriginChatID     *string    `gorm:"size:191;index:idx_origin"`
+    SenderID         *string    `gorm:"size:500"`
 
     Status           string     `gorm:"size:32;not null;index"`
     ResultText       *string    `gorm:"type:longtext"`
@@ -379,6 +385,7 @@ type SubagentTaskModel struct {
 
 - JSON 字段直接用 `[]byte` 就够，不额外引入别的类型
 - `origin_chat_id` 用 `191`，避免 utf8mb4 索引长度问题
+- `sender_id` 用 `500`，兼容不同渠道较长的发送者标识
 - v1 不建议一开始搞太多关联表
 
 ---

@@ -28,6 +28,7 @@ func (s *Store) CreateSubmitted(ctx context.Context, task *tools.SubagentTaskRec
 		TaskText:      task.Task,
 		OriginChannel: stringPtr(task.OriginChannel),
 		OriginChatID:  stringPtr(task.OriginChatID),
+		SenderID:      stringPtr(task.SenderID),
 		Status:        task.Status,
 		MetadataJSON:  cloneBytes(task.MetadataJSON),
 		WebhookJSON:   cloneBytes(task.WebhookJSON),

@@ -40,12 +40,18 @@ type mockAsyncRegistryTool struct {
 	lastCB AsyncCallback
 }
 
+type mockNilRegistryTool struct {
+	mockRegistryTool
+}
+
+func (m *mockNilRegistryTool) Execute(_ context.Context, _ map[string]any) *ToolResult {
+	return nil
+}
+
 func (m *mockAsyncRegistryTool) ExecuteAsync(_ context.Context, args map[string]any, cb AsyncCallback) *ToolResult {
 	m.lastCB = cb
 	return m.result
 }
-
-// --- helpers ---
 
 func newMockTool(name, desc string) *mockRegistryTool {
 	return &mockRegistryTool{
@@ -143,7 +149,8 @@ func TestToolRegistry_ExecuteWithContext_InjectsToolContext(t *testing.T) {
 	}
 	r.Register(ct)
 
-	r.ExecuteWithContext(context.Background(), "ctx_tool", nil, "telegram", "chat-42", nil)
+	ctx := WithToolSenderID(context.Background(), "user-7")
+	r.ExecuteWithContext(ctx, "ctx_tool", nil, "telegram", "chat-42", nil)
 
 	if ct.lastCtx == nil {
 		t.Fatal("expected Execute to be called")
@@ -153,6 +160,9 @@ func TestToolRegistry_ExecuteWithContext_InjectsToolContext(t *testing.T) {
 	}
 	if got := ToolChatID(ct.lastCtx); got != "chat-42" {
 		t.Errorf("expected chatID 'chat-42', got %q", got)
+	}
+	if got := ToolSenderID(ct.lastCtx); got != "user-7" {
+		t.Errorf("expected senderID 'user-7', got %q", got)
 	}
 }
 
@@ -199,6 +209,27 @@ func TestToolRegistry_ExecuteWithContext_AsyncCallback(t *testing.T) {
 	at.lastCB(context.Background(), SilentResult("done"))
 	if !called {
 		t.Error("expected callback to be invoked")
+	}
+}
+
+func TestToolRegistry_ExecuteWithContext_NilResult(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockNilRegistryTool{
+		mockRegistryTool: *newMockTool("nil_tool", "returns nil"),
+	})
+
+	result := r.ExecuteWithContext(context.Background(), "nil_tool", nil, "", "", nil)
+	if result == nil {
+		t.Fatal("expected non-nil fallback result")
+	}
+	if !result.IsError {
+		t.Fatal("expected nil result to be converted to error")
+	}
+	if !strings.Contains(result.ForLLM, "returned nil result") {
+		t.Fatalf("expected nil-result message, got %q", result.ForLLM)
+	}
+	if result.Err == nil {
+		t.Fatal("expected fallback error to be preserved")
 	}
 }
 

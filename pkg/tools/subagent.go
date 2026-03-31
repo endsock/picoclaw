@@ -60,6 +60,7 @@ type SpawnRequest struct {
 	Webhook       *SubagentWebhook
 	OriginChannel string
 	OriginChatID  string
+	SenderID      string
 }
 
 type SubagentTask struct {
@@ -70,6 +71,7 @@ type SubagentTask struct {
 	ModelName     string
 	OriginChannel string
 	OriginChatID  string
+	SenderID      string
 	Status        string
 	Result        string
 	Error         string
@@ -101,6 +103,7 @@ type SubagentTaskRecord struct {
 	Task          string
 	OriginChannel string
 	OriginChatID  string
+	SenderID      string
 	MetadataJSON  []byte
 	WebhookJSON   []byte
 	Status        string
@@ -278,6 +281,7 @@ func (sm *SubagentManager) SpawnWithRequest(
 		ModelName:     req.ModelName,
 		OriginChannel: req.OriginChannel,
 		OriginChatID:  req.OriginChatID,
+		SenderID:      req.SenderID,
 		Status:        "running",
 		Created:       submittedAt,
 		Source:        source,
@@ -425,6 +429,7 @@ func snapshotTask(task *SubagentTask) *SubagentTask {
 		ModelName:     task.ModelName,
 		OriginChannel: task.OriginChannel,
 		OriginChatID:  task.OriginChatID,
+		SenderID:      task.SenderID,
 		Status:        task.Status,
 		Result:        task.Result,
 		Error:         task.Error,
@@ -463,6 +468,7 @@ func buildTaskRecord(task *SubagentTask) *SubagentTaskRecord {
 		Task:          task.Task,
 		OriginChannel: task.OriginChannel,
 		OriginChatID:  task.OriginChatID,
+		SenderID:      task.SenderID,
 		MetadataJSON:  metadataJSON,
 		WebhookJSON:   webhookJSON,
 		Status:        "submitted",
@@ -653,8 +659,13 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 	iterations := 0
 	var callbackResult *ToolResult
 
+	runCtx := ctx
+	if task.SenderID != "" {
+		runCtx = WithToolSenderID(runCtx, task.SenderID)
+	}
+
 	select {
-	case <-ctx.Done():
+	case <-runCtx.Done():
 		finalStatus = "canceled"
 		finalError = "Task canceled before execution"
 		callbackResult = &ToolResult{
@@ -663,10 +674,10 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 			Silent:  false,
 			IsError: true,
 			Async:   false,
-			Err:     ctx.Err(),
+			Err:     runCtx.Err(),
 		}
 	default:
-		loopResult, err := RunToolLoop(ctx, ToolLoopConfig{
+		loopResult, err := RunToolLoop(runCtx, ToolLoopConfig{
 			Provider:      sm.provider,
 			Model:         cfg.model,
 			Tools:         cfg.tools,
@@ -677,10 +688,10 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 			finalStatus = "failed"
 			finalError = fmt.Sprintf("Error: %v", err)
 			callbackErr := err
-			if ctx.Err() != nil {
+			if runCtx.Err() != nil {
 				finalStatus = "canceled"
 				finalError = "Task canceled during execution"
-				callbackErr = ctx.Err()
+				callbackErr = runCtx.Err()
 			}
 			callbackResult = &ToolResult{
 				ForLLM:  finalError,
@@ -732,7 +743,7 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 			patch.CallbackForLLM = callbackResult.ForLLM
 			patch.CallbackForUser = callbackResult.ForUser
 		}
-		if err := recorder.FinishTask(ctx, task.ID, patch); err != nil {
+		if err := recorder.FinishTask(runCtx, task.ID, patch); err != nil {
 			logger.WarnCF("subagent", "Failed to finish subagent task record", map[string]any{
 				"task_id": task.ID,
 				"error":   err.Error(),
@@ -741,7 +752,7 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 	}
 
 	if callback != nil && callbackResult != nil {
-		callback(ctx, callbackResult)
+		callback(runCtx, callbackResult)
 	}
 
 	logger.InfoCF("subagent", "Subagent status changed", map[string]any{
@@ -772,7 +783,7 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 			FinishedAtMS: taskSnapshot.Finished,
 			DurationMS:   durationMS,
 		}
-		err := sendWebhook(ctx, webhookpkg.SendRequest{
+		err := sendWebhook(runCtx, webhookpkg.SendRequest{
 			URL:             taskSnapshot.Webhook.URL,
 			Headers:         cloneStringMap(taskSnapshot.Webhook.Headers),
 			Event:           taskSnapshot.Status,

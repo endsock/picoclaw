@@ -13,6 +13,19 @@ type MockLLMProvider struct {
 	lastOptions map[string]any
 }
 
+type panicRegistryTool struct{}
+
+func (p *panicRegistryTool) Name() string        { return "panic_tool" }
+func (p *panicRegistryTool) Description() string { return "panics for testing" }
+func (p *panicRegistryTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+	}
+}
+func (p *panicRegistryTool) Execute(context.Context, map[string]any) *ToolResult {
+	panic("boom")
+}
+
 func (m *MockLLMProvider) Chat(
 	ctx context.Context,
 	messages []providers.Message,
@@ -67,6 +80,77 @@ func TestSubagentManager_SetLLMOptions_AppliesToRunToolLoop(t *testing.T) {
 	if provider.lastOptions["temperature"] != 0.6 {
 		t.Fatalf("temperature = %v, want %v", provider.lastOptions["temperature"], 0.6)
 	}
+}
+
+func TestSubagentTool_Execute_ToolPanicRecovered(t *testing.T) {
+	provider := &MockLLMProviderWithToolCalls{
+		responses: []*providers.LLMResponse{
+			{
+				ToolCalls: []providers.ToolCall{{
+					ID:        "call-panic",
+					Name:      "panic_tool",
+					Arguments: map[string]any{},
+				}},
+			},
+			{
+				Content: "tool panic_tool panicked: boom",
+			},
+		},
+	}
+	registry := NewToolRegistry()
+	registry.Register(&panicRegistryTool{})
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test", registry, 2, nil)
+	tool := NewSubagentTool(manager)
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"task":       "Trigger panic tool",
+		"model_name": "test-model",
+	})
+
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.IsError {
+		t.Fatalf("expected subagent tool to keep running after panic recovery, got: %+v", result)
+	}
+	if !strings.Contains(result.ForLLM, "tool panic_tool panicked: boom") {
+		t.Fatalf("expected panic message in ForLLM, got: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForUser, "tool panic_tool panicked: boom") {
+		t.Fatalf("expected panic message in ForUser, got: %s", result.ForUser)
+	}
+}
+
+type MockLLMProviderWithToolCalls struct {
+	responses []*providers.LLMResponse
+	index     int
+}
+
+func (m *MockLLMProviderWithToolCalls) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	options map[string]any,
+) (*providers.LLMResponse, error) {
+	if m.index >= len(m.responses) {
+		return &providers.LLMResponse{Content: "done"}, nil
+	}
+	resp := m.responses[m.index]
+	m.index++
+	return resp, nil
+}
+
+func (m *MockLLMProviderWithToolCalls) GetDefaultModel() string {
+	return "test-model"
+}
+
+func (m *MockLLMProviderWithToolCalls) SupportsTools() bool {
+	return true
+}
+
+func (m *MockLLMProviderWithToolCalls) GetContextWindow() int {
+	return 4096
 }
 
 // TestSubagentTool_Name verifies tool name

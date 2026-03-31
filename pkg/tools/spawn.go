@@ -110,9 +110,19 @@ func (t *SpawnTool) execute(ctx context.Context, args map[string]any, cb AsyncCa
 	if chatID == "" {
 		chatID = "direct"
 	}
+	senderID := ToolSenderID(ctx)
 
 	// Pass callback to manager for async completion notification
-	result, err := t.manager.Spawn(ctx, task, label, agentID, modelName, channel, chatID, cb)
+	_, result, err := t.manager.SpawnWithRequest(ctx, SpawnRequest{
+		Task:          task,
+		Label:         label,
+		AgentID:       agentID,
+		ModelName:     modelName,
+		Source:        "tool",
+		OriginChannel: channel,
+		OriginChatID:  chatID,
+		SenderID:      senderID,
+	}, cb)
 	if err != nil {
 		toolResult := ErrorResult(fmt.Sprintf("failed to spawn subagent: %v", err)).WithError(err)
 		if errors.Is(err, workqueue.ErrQueueFull) {

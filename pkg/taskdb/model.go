@@ -12,6 +12,7 @@ type SubagentTaskModel struct {
 	TaskText        string  `gorm:"type:longtext;not null"`
 	OriginChannel   *string `gorm:"size:64;index:idx_subagent_tasks_origin,priority:1"`
 	OriginChatID    *string `gorm:"size:191;index:idx_subagent_tasks_origin,priority:2"`
+	SenderID        *string `gorm:"size:500"`
 	Status          string  `gorm:"size:32;not null;index:idx_subagent_tasks_status"`
 	ResultText      *string `gorm:"type:longtext"`
 	ErrorText       *string `gorm:"type:longtext"`

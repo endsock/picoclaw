@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime/debug"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -137,6 +138,20 @@ func RunToolLoop(
 			wg.Add(1)
 			go func(idx int, tc providers.ToolCall) {
 				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						panicErr := fmt.Errorf("tool %s panicked: %v", tc.Name, r)
+						logger.ErrorCF("toolloop", "Tool execution panicked",
+							map[string]any{
+								"tool":         tc.Name,
+								"iteration":    iteration,
+								"tool_call_id": tc.ID,
+								"panic":        fmt.Sprintf("%v", r),
+								"stack":        string(debug.Stack()),
+							})
+						results[idx].result = ErrorResult(panicErr.Error()).WithError(panicErr)
+					}
+				}()
 
 				argsJSON, _ := json.Marshal(tc.Arguments)
 				argsPreview := utils.Truncate(string(argsJSON), 200)

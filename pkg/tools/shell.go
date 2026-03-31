@@ -15,6 +15,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 type ExecTool struct {
@@ -259,14 +260,38 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 	}
 
 	prepareCommandForTermination(cmd)
+	logger.InfoCF("tool", "Exec command prepared",
+		map[string]any{
+			"tool":       t.Name(),
+			"command":    command,
+			"cwd":        cwd,
+			"timeout_ms": t.timeout.Milliseconds(),
+			"os":         runtime.GOOS,
+			"shell":      cmd.Path,
+			"shell_args": cmd.Args,
+		})
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
+		logger.ErrorCF("tool", "Exec command failed to start",
+			map[string]any{
+				"tool":    t.Name(),
+				"command": command,
+				"cwd":     cwd,
+				"error":   err.Error(),
+			})
 		return ErrorResult(fmt.Sprintf("failed to start command: %v", err))
 	}
+	logger.InfoCF("tool", "Exec command started",
+		map[string]any{
+			"tool":    t.Name(),
+			"command": command,
+			"cwd":     cwd,
+			"pid":     cmd.Process.Pid,
+		})
 
 	done := make(chan error, 1)
 	go func() {
@@ -276,15 +301,60 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 	var err error
 	select {
 	case err = <-done:
+		logger.InfoCF("tool", "Exec command wait returned",
+			map[string]any{
+				"tool":       t.Name(),
+				"command":    command,
+				"cwd":        cwd,
+				"pid":        processPID(cmd),
+				"error":      errorString(err),
+				"stdout_len": stdout.Len(),
+				"stderr_len": stderr.Len(),
+			})
 	case <-cmdCtx.Done():
+		logger.WarnCF("tool", "Exec command context done",
+			map[string]any{
+				"tool":      t.Name(),
+				"command":   command,
+				"cwd":       cwd,
+				"pid":       processPID(cmd),
+				"ctx_error": cmdCtx.Err().Error(),
+			})
 		_ = terminateProcessTree(cmd)
 		select {
 		case err = <-done:
+			logger.InfoCF("tool", "Exec command wait returned after termination",
+				map[string]any{
+					"tool":       t.Name(),
+					"command":    command,
+					"cwd":        cwd,
+					"pid":        processPID(cmd),
+					"error":      errorString(err),
+					"stdout_len": stdout.Len(),
+					"stderr_len": stderr.Len(),
+				})
 		case <-time.After(2 * time.Second):
 			if cmd.Process != nil {
+				logger.WarnCF("tool", "Exec command kill fallback triggered",
+					map[string]any{
+						"tool":    t.Name(),
+						"command": command,
+						"cwd":     cwd,
+						"pid":     processPID(cmd),
+					})
 				_ = cmd.Process.Kill()
 			}
 			err = <-done
+			logger.InfoCF("tool", "Exec command wait returned after kill fallback",
+				map[string]any{
+					"tool":       t.Name(),
+					"command":    command,
+					"cwd":        cwd,
+					"pid":        processPID(cmd),
+					"error":      errorString(err),
+					"stdout_len": stdout.Len(),
+					"stderr_len": stderr.Len(),
+				})
 		}
 	}
 
@@ -294,6 +364,17 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 	}
 
 	if err != nil {
+		logger.WarnCF("tool", "Exec command finished with error",
+			map[string]any{
+				"tool":       t.Name(),
+				"command":    command,
+				"cwd":        cwd,
+				"pid":        processPID(cmd),
+				"error":      errorString(err),
+				"ctx_error":  errorString(cmdCtx.Err()),
+				"stdout_len": stdout.Len(),
+				"stderr_len": stderr.Len(),
+			})
 		if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
 			msg := fmt.Sprintf("Command timed out after %v", t.timeout)
 			return &ToolResult{
@@ -303,6 +384,16 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 			}
 		}
 		output += fmt.Sprintf("\nExit code: %v", err)
+	} else {
+		logger.InfoCF("tool", "Exec command finished successfully",
+			map[string]any{
+				"tool":       t.Name(),
+				"command":    command,
+				"cwd":        cwd,
+				"pid":        processPID(cmd),
+				"stdout_len": stdout.Len(),
+				"stderr_len": stderr.Len(),
+			})
 	}
 
 	if output == "" {
@@ -327,6 +418,20 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 		ForUser: output,
 		IsError: false,
 	}
+}
+
+func processPID(cmd *exec.Cmd) int {
+	if cmd == nil || cmd.Process == nil {
+		return 0
+	}
+	return cmd.Process.Pid
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (t *ExecTool) guardCommand(command, cwd string) string {

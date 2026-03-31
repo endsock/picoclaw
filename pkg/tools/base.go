@@ -21,8 +21,9 @@ type Tool interface {
 type toolCtxKey struct{ name string }
 
 var (
-	ctxKeyChannel = &toolCtxKey{"channel"}
-	ctxKeyChatID  = &toolCtxKey{"chatID"}
+	ctxKeyChannel  = &toolCtxKey{"channel"}
+	ctxKeyChatID   = &toolCtxKey{"chatID"}
+	ctxKeySenderID = &toolCtxKey{"senderID"}
 )
 
 // WithToolContext returns a child context carrying channel and chatID.
@@ -41,6 +42,17 @@ func ToolChannel(ctx context.Context) string {
 // ToolChatID extracts the chatID from ctx, or "" if unset.
 func ToolChatID(ctx context.Context) string {
 	v, _ := ctx.Value(ctxKeyChatID).(string)
+	return v
+}
+
+// WithToolSenderID returns a child context carrying senderID.
+func WithToolSenderID(ctx context.Context, senderID string) context.Context {
+	return context.WithValue(ctx, ctxKeySenderID, senderID)
+}
+
+// ToolSenderID extracts the senderID from ctx, or "" if unset.
+func ToolSenderID(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeySenderID).(string)
 	return v
 }
 

@@ -197,6 +197,14 @@ func (r *ToolRegistry) ExecuteWithContext(
 	} else {
 		result = tool.Execute(ctx, args)
 	}
+	if result == nil {
+		nilErr := fmt.Errorf("tool %q returned nil result", name)
+		logger.ErrorCF("tool", "Tool returned nil result",
+			map[string]any{
+				"tool": name,
+			})
+		result = ErrorResult(nilErr.Error()).WithError(nilErr)
+	}
 	duration := time.Since(start)
 
 	// Log based on result type

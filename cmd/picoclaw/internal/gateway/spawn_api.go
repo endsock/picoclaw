@@ -120,6 +120,7 @@ func newSpawnCreateHandler(agentLoop *agent.AgentLoop) func(http.ResponseWriter,
 			Webhook:       buildSubagentWebhook(req.Webhook),
 			OriginChannel: channel,
 			OriginChatID:  chatID,
+			SenderID:      strings.TrimSpace(req.Metadata["sender_id"]),
 		}, callback)
 		if err != nil {
 			if errors.Is(err, workqueue.ErrQueueFull) {

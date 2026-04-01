@@ -4,8 +4,35 @@ import sys
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pymysql
+
 HOST = "0.0.0.0"
 PORT = 9000
+
+DB_HOST = "mysql-pops01cn-rw.svc.rezen.work"
+DB_USER = "picobot_w"
+DB_PASSWORD = "4bqypF5srLc8U38f"
+DB_NAME = "picobot"
+
+
+def update_mysql_slow_sql(md5, result):
+    conn = pymysql.connect(
+        host=DB_HOST,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+        charset="utf8mb4",
+        autocommit=True,
+    )
+    try:
+        with conn.cursor() as cursor:
+            affected = cursor.execute(
+                "update mysql_slow_sql set `status`=%s, assistant_ai=%s where md5=%s",
+                (2, result, md5),
+            )
+            print(f"MySQL updated: md5={md5}, affected_rows={affected}")
+    finally:
+        conn.close()
 
 
 class WebhookHandler(BaseHTTPRequestHandler):
@@ -18,6 +45,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         raw_body = self.rfile.read(length) if length > 0 else b""
         body_text = raw_body.decode("utf-8", errors="replace")
+        payload = None
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print("=" * 80)
@@ -31,12 +59,24 @@ class WebhookHandler(BaseHTTPRequestHandler):
         print("Body:")
         if body_text:
             try:
-                parsed = json.loads(body_text)
-                print(json.dumps(parsed, ensure_ascii=False, indent=2))
+                payload = json.loads(body_text)
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
             except json.JSONDecodeError:
                 print(body_text)
         else:
             print("  <empty>")
+
+        if isinstance(payload, dict):
+            metadata = payload.get("metadata") or {}
+            if (
+                payload.get("status") == "completed"
+                and metadata.get("task_type") == "mysql_slow_sql"
+            ):
+                try:
+                    update_mysql_slow_sql(metadata.get("md5"), payload.get("result"))
+                except Exception as e:
+                    print(f"MySQL update failed: {e}")
+
         print("=" * 80, flush=True)
 
         response = {

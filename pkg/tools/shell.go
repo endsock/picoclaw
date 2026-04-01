@@ -28,7 +28,16 @@ type ExecTool struct {
 	allowRemote         bool
 }
 
+type shellProfile int
+
+const (
+	shellProfilePOSIX shellProfile = iota
+	shellProfilePowerShell
+)
+
 var (
+	dangerousBacktickContentPattern = regexp.MustCompile(`\s|[|&;<>()$]`)
+
 	defaultDenyPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`\brm\s+-[rf]{1,2}\b`),
 		regexp.MustCompile(`\bdel\s+/[fq]\b`),
@@ -44,9 +53,6 @@ var (
 		),
 		regexp.MustCompile(`\b(shutdown|reboot|poweroff)\b`),
 		regexp.MustCompile(`:\(\)\s*\{.*\};\s*:`),
-		regexp.MustCompile(`\$\([^)]+\)`),
-		regexp.MustCompile(`\$\{[^}]+\}`),
-		regexp.MustCompile("`[^`]*\\s[^`]*`"),
 		regexp.MustCompile(`\|\s*sh\b`),
 		regexp.MustCompile(`\|\s*bash\b`),
 		regexp.MustCompile(`;\s*rm\s+-[rf]`),
@@ -455,6 +461,93 @@ func errorString(err error) string {
 	return err.Error()
 }
 
+func detectShellProfile() shellProfile {
+	if runtime.GOOS == "windows" {
+		return shellProfilePowerShell
+	}
+	return shellProfilePOSIX
+}
+
+func isEscaped(command string, idx int) bool {
+	backslashes := 0
+	for i := idx - 1; i >= 0 && command[i] == '\\'; i-- {
+		backslashes++
+	}
+	return backslashes%2 == 1
+}
+
+func findMatchingDelimiter(command string, start int, delim byte) int {
+	for i := start; i < len(command); i++ {
+		if command[i] != delim || isEscaped(command, i) {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+func hasDangerousShellExpansion(command string, profile shellProfile) bool {
+	for i := 0; i < len(command); i++ {
+		switch command[i] {
+		case '\'':
+			end := strings.IndexByte(command[i+1:], '\'')
+			if end == -1 {
+				return false
+			}
+			i += end + 1
+		case '"':
+			end := i + 1
+			for end < len(command) {
+				if command[end] == '"' && !isEscaped(command, end) {
+					break
+				}
+				if profile == shellProfilePOSIX && command[end] == '`' && !isEscaped(command, end) {
+					close := findMatchingDelimiter(command, end+1, '`')
+					if close == -1 {
+						return true
+					}
+					if dangerousBacktickContentPattern.MatchString(command[end+1 : close]) {
+						return true
+					}
+					end = close
+					continue
+				}
+				if command[end] == '$' && end+1 < len(command) && command[end+1] == '(' && !isEscaped(command, end) {
+					return true
+				}
+				if command[end] == '$' && end+1 < len(command) && command[end+1] == '{' && !isEscaped(command, end) {
+					return true
+				}
+				end++
+			}
+			if end >= len(command) {
+				return false
+			}
+			i = end
+		case '`':
+			if profile != shellProfilePOSIX || isEscaped(command, i) {
+				continue
+			}
+			end := findMatchingDelimiter(command, i+1, '`')
+			if end == -1 {
+				return true
+			}
+			if dangerousBacktickContentPattern.MatchString(command[i+1 : end]) {
+				return true
+			}
+			i = end
+		case '$':
+			if isEscaped(command, i) || i+1 >= len(command) {
+				continue
+			}
+			if command[i+1] == '(' || command[i+1] == '{' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (t *ExecTool) guardCommand(command, cwd string) string {
 	cmd := strings.TrimSpace(command)
 	lower := strings.ToLower(cmd)
@@ -469,6 +562,9 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 	}
 
 	if !explicitlyAllowed {
+		if hasDangerousShellExpansion(cmd, detectShellProfile()) {
+			return "Command blocked by safety guard (dangerous pattern detected)"
+		}
 		for _, pattern := range t.denyPatterns {
 			if pattern.MatchString(lower) {
 				return "Command blocked by safety guard (dangerous pattern detected)"

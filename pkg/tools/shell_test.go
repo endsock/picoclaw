@@ -171,6 +171,56 @@ func TestShellTool_DangerousCommand_KillBlocked(t *testing.T) {
 	}
 }
 
+func TestShellTool_DangerousCommand_BacktickSubstitutionDetectedInPOSIX(t *testing.T) {
+	if !hasDangerousShellExpansion("echo `uname -a`", shellProfilePOSIX) {
+		t.Fatalf("expected POSIX backtick command substitution to be detected")
+	}
+}
+
+func TestShellTool_DangerousCommand_BacktickNotBlockedInPowerShell(t *testing.T) {
+	tool, err := NewExecTool("", false)
+	if err != nil {
+		t.Errorf("unable to configure exec tool: %s", err)
+	}
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"command": "echo `uname -a`",
+	})
+	if result.IsError && strings.Contains(result.ForLLM, "dangerous pattern detected") {
+		t.Fatalf("expected PowerShell backtick escape not to be blocked, got: %s", result.ForLLM)
+	}
+}
+
+func TestShellTool_DangerousCommand_DollarParenBlocked(t *testing.T) {
+	tool, err := NewExecTool("", false)
+	if err != nil {
+		t.Errorf("unable to configure exec tool: %s", err)
+	}
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"command": "echo $(uname -a)",
+	})
+	if !result.IsError {
+		t.Fatalf("expected dollar-paren substitution to be blocked")
+	}
+	if !strings.Contains(result.ForLLM, "dangerous pattern detected") {
+		t.Errorf("expected dangerous pattern detected, got: %s", result.ForLLM)
+	}
+}
+
+func TestShellTool_MySQLQuotedIdentifierNotBlocked(t *testing.T) {
+	tool, err := NewExecTool("", false)
+	if err != nil {
+		t.Errorf("unable to configure exec tool: %s", err)
+	}
+
+	command := "mysql -e \"select bi.\\`status\\` from bill_item bi where bi.\\`status\\` = 2 and oi.\\`status\\` = 3\""
+	guardError := tool.guardCommand(command, "")
+	if strings.Contains(guardError, "dangerous pattern detected") {
+		t.Fatalf("expected mysql escaped quoted identifier to bypass safety guard, got: %s", guardError)
+	}
+}
+
 // TestShellTool_MissingCommand verifies error handling for missing command
 func TestShellTool_MissingCommand(t *testing.T) {
 	tool, err := NewExecTool("", false)
